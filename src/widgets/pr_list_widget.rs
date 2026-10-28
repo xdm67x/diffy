@@ -91,7 +91,7 @@ impl StatefulWidget for PrListWidget<'_> {
             }
         }
 
-        list_state.select(Some(self.selected_row));
+        list_state.select((!self.rows.is_empty()).then_some(self.selected_row));
         let list = List::new(items)
             .block(
                 Block::bordered()

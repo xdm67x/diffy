@@ -60,8 +60,15 @@ repository and PR number.
 | `Enter` / `r` | Run the review council on the selected PR |
 | `J` / `PageDown` | Scroll the detail pane down |
 | `K` / `PageUp` | Scroll the detail pane up |
+| Mouse wheel | Scroll the detail pane, or move the selection over the list |
+| `/` | Filter the list by repository name (type, `Enter` apply, `Esc` cancel) |
+| `c` | Clear the repository filter |
 | `R` | Refresh the PR list from GitHub |
 | `q` / `Esc` | Quit |
+
+The repository filter only hides rows. Every fetched PR stays loaded, so clearing the
+filter brings all of your review requests back. Errors (failed refresh, review, or save)
+appear as a toast in the bottom-right corner and disappear on their own.
 
 Only one review runs at a time. The list and detail pane update live as the review moves
 through its stages.

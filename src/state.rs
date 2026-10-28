@@ -1,8 +1,12 @@
 use crate::models::{PrGroup, PullRequest, ReviewReport, group_by_repo};
 use crate::review::{ReviewEvent, Stage};
+use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
+
+const TOAST_LIFETIME: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Debug)]
 pub enum ReviewStatus {
@@ -17,6 +21,11 @@ pub enum Row {
     Pr(usize),
 }
 
+pub struct Toast {
+    pub message: String,
+    expires: Instant,
+}
+
 pub struct State {
     pub groups: Vec<PrGroup>,
     pub prs: Vec<PullRequest>,
@@ -26,7 +35,12 @@ pub struct State {
     pub reviews: HashMap<String, ReviewStatus>,
     pub active: Option<String>,
     pub detail_scroll: u16,
-    pub notice: Option<String>,
+    pub toast: Option<Toast>,
+    /// Repository filter, empty means every repo is shown.
+    pub filter: String,
+    pub filter_input: bool,
+    pub list_area: Rect,
+    pub detail_area: Rect,
 }
 
 impl State {
@@ -40,7 +54,11 @@ impl State {
             reviews: HashMap::new(),
             active: None,
             detail_scroll: 0,
-            notice: None,
+            toast: None,
+            filter: String::new(),
+            filter_input: false,
+            list_area: Rect::default(),
+            detail_area: Rect::default(),
         };
         state.set_prs(prs);
         state
@@ -48,11 +66,21 @@ impl State {
 
     pub fn set_prs(&mut self, prs: Vec<PullRequest>) {
         self.groups = group_by_repo(prs);
+        self.rebuild_rows();
+    }
+
+    /// Rebuilds the visible rows from the full PR data, applying the repo filter.
+    /// Filtering only hides rows, so clearing it brings every PR back.
+    fn rebuild_rows(&mut self) {
         self.prs.clear();
         self.rows.clear();
         self.list_state = ListState::default();
 
+        let needle = self.filter.trim().to_lowercase();
         for group in &self.groups {
+            if !needle.is_empty() && !group.repo.to_lowercase().contains(&needle) {
+                continue;
+            }
             self.rows.push(Row::Header {
                 repo: group.repo.clone(),
                 count: group.prs.len(),
@@ -63,14 +91,47 @@ impl State {
             }
         }
 
-        if !self.is_pr_row(self.selected_row) {
-            self.selected_row = self
-                .rows
-                .iter()
-                .position(|row| matches!(row, Row::Pr(_)))
-                .unwrap_or(0);
-        }
+        self.selected_row = self
+            .rows
+            .iter()
+            .position(|row| matches!(row, Row::Pr(_)))
+            .unwrap_or(0);
         self.detail_scroll = 0;
+    }
+
+    pub fn filter_push(&mut self, character: char) {
+        self.filter.push(character);
+        self.rebuild_rows();
+    }
+
+    pub fn filter_pop(&mut self) {
+        if self.filter.pop().is_some() {
+            self.rebuild_rows();
+        }
+    }
+
+    pub fn clear_filter(&mut self) {
+        if !self.filter.is_empty() {
+            self.filter.clear();
+            self.rebuild_rows();
+        }
+    }
+
+    pub fn notify(&mut self, message: impl Into<String>) {
+        self.toast = Some(Toast {
+            message: message.into(),
+            expires: Instant::now() + TOAST_LIFETIME,
+        });
+    }
+
+    pub fn expire_toast(&mut self) {
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| toast.expires <= Instant::now())
+        {
+            self.toast = None;
+        }
     }
 
     pub fn selected_pr(&self) -> Option<&PullRequest> {
@@ -120,7 +181,9 @@ impl State {
                 if self.active.as_deref() == Some(url.as_str()) {
                     self.active = None;
                 }
-                self.reviews.insert(url, ReviewStatus::Failed(error));
+                self.reviews
+                    .insert(url, ReviewStatus::Failed(error.clone()));
+                self.notify(format!("review failed: {error}"));
                 self.detail_scroll = 0;
             }
         }
@@ -171,5 +234,40 @@ impl State {
 
     fn is_pr_row(&self, index: usize) -> bool {
         matches!(self.rows.get(index), Some(Row::Pr(_)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Author, Repository};
+
+    fn pr(number: u64, repo: &str) -> PullRequest {
+        PullRequest {
+            number,
+            title: format!("PR {number}"),
+            url: format!("https://github.com/{repo}/pull/{number}"),
+            body: String::new(),
+            repository: Repository {
+                name_with_owner: repo.to_string(),
+            },
+            author: Author::default(),
+            is_draft: false,
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn repo_filter_hides_rows_without_dropping_prs() {
+        let mut state = State::new(vec![pr(1, "acme/api"), pr(2, "acme/web")]);
+        for character in "WEB".chars() {
+            state.filter_push(character);
+        }
+        assert_eq!(state.prs.len(), 1);
+        assert_eq!(state.prs[0].repo_name(), "acme/web");
+
+        state.clear_filter();
+        assert_eq!(state.prs.len(), 2);
+        assert_eq!(state.rows.len(), 4);
     }
 }
