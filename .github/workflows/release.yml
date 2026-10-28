@@ -57,12 +57,16 @@ jobs:
           branch="release/v$new"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$branch"
+          # -C / -f so a rerun after a failed PR creation reuses the same branch
+          git switch -C "$branch"
           git commit -am "Release v$new"
-          git push origin "$branch"
-          gh pr create --base main --head "$branch" \
-            --title "Release v$new" \
-            --body "Bumps the crate version to v$new. Merging this runs the release build."
+          git push -f origin "$branch"
+
+          if [ -z "$(gh pr list --head "$branch" --state open --json url -q '.[0].url')" ]; then
+            gh pr create --base main --head "$branch" \
+              --title "Release v$new" \
+              --body "Bumps the crate version to v$new. Merging this runs the release build."
+          fi
 
   release:
     if: >-
