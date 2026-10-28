@@ -28,11 +28,9 @@ select.
 cargo run --release
 ```
 
-Diffy looks for the review system prompt in this order:
-
-1. The path in `DIFFY_SYSTEM_PROMPT`
-2. `./SYSTEM_PROMPT.md`
-3. `SYSTEM_PROMPT.md` next to the project at build time
+The review system prompt is embedded in the binary at build time with `include_str!`, so a
+built Diffy does not need `SYSTEM_PROMPT.md` on disk. Set `DIFFY_SYSTEM_PROMPT` to a file
+path to override the embedded prompt at runtime.
 
 To include team review requests, list the teams in `~/.diffy/settings.json`:
 
@@ -140,7 +138,7 @@ Environment:
 | Variable | Meaning |
 | --- | --- |
 | `DIFFY_TEAMS` | Comma-separated teams, used when `settings.json` has no teams |
-| `DIFFY_SYSTEM_PROMPT` | Path to an alternative system prompt file |
+| `DIFFY_SYSTEM_PROMPT` | Path to a system prompt file that overrides the embedded one |
 | `DIFFY_HOME` | Directory for `settings.json` and `reviews/` (default `~/.diffy`) |
 
 Diffs larger than 120 000 characters are truncated in the initial prompt. The prompt tells
@@ -171,8 +169,8 @@ src/
   store.rs                   ~/.diffy settings and saved review log
   widgets/
     pr_list_widget.rs        repo-grouped PR list
-    detail_widget.rs         PR details and review report
-SYSTEM_PROMPT.md             system prompt for reviewers and judge
+    detail_widget.rs         PR details (description rendered as markdown) and review report
+SYSTEM_PROMPT.md             system prompt for reviewers and judge, embedded at build time
 ```
 
 ## Development

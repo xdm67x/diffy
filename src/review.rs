@@ -13,6 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_DIFF_CHARS: usize = 120_000;
 
+/// Bundled so the review protocol travels with the binary.
+const SYSTEM_PROMPT: &str = include_str!("../SYSTEM_PROMPT.md");
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stage {
     FetchingDiff,
@@ -108,16 +111,11 @@ fn join_reviewer(handle: thread::ScopedJoinHandle<'_, Result<String>>) -> Result
 }
 
 fn load_system_prompt() -> Result<String> {
-    let configured = env::var("DIFFY_SYSTEM_PROMPT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("SYSTEM_PROMPT.md"));
-    let path = if configured.exists() {
-        configured
-    } else {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("SYSTEM_PROMPT.md")
-    };
-    fs::read_to_string(&path)
-        .wrap_err_with(|| format!("could not read review system prompt at {}", path.display()))
+    match env::var("DIFFY_SYSTEM_PROMPT") {
+        Ok(path) => fs::read_to_string(&path)
+            .wrap_err_with(|| format!("could not read review system prompt at {path}")),
+        Err(_) => Ok(SYSTEM_PROMPT.to_string()),
+    }
 }
 
 fn write_agents_file(system_prompt: &str) -> Result<PathBuf> {

@@ -27,7 +27,7 @@ impl Widget for DetailWidget<'_> {
         let block = Block::bordered()
             .title(title)
             .border_style(Style::new().fg(Color::DarkGray));
-        let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut lines: Vec<Line<'_>> = Vec::new();
 
         match self.pr {
             None => {
@@ -61,9 +61,7 @@ impl Widget for DetailWidget<'_> {
 
                 lines.push(Line::default());
                 lines.push(heading("Description"));
-                for line in pr.description().lines() {
-                    lines.push(Line::from(line.to_string()));
-                }
+                lines.extend(tui_markdown::from_str(pr.description()).lines);
 
                 lines.push(Line::default());
                 lines.push(heading("Review"));
@@ -105,7 +103,7 @@ fn heading(text: &str) -> Line<'static> {
     ))
 }
 
-fn push_status(lines: &mut Vec<Line<'static>>, status: Option<&ReviewStatus>) {
+fn push_status(lines: &mut Vec<Line<'_>>, status: Option<&ReviewStatus>) {
     match status {
         None => lines.push(Line::from(Span::styled(
             "Not reviewed yet. Press Enter or r to run the review council.",
@@ -137,7 +135,7 @@ fn push_status(lines: &mut Vec<Line<'static>>, status: Option<&ReviewStatus>) {
     }
 }
 
-fn push_report(lines: &mut Vec<Line<'static>>, report: &ReviewReport) {
+fn push_report(lines: &mut Vec<Line<'_>>, report: &ReviewReport) {
     let (label, color) = match report.verdict {
         crate::models::Verdict::Merge => ("VERDICT: MERGE", Color::Green),
         crate::models::Verdict::RequestChanges => ("VERDICT: REQUEST CHANGES", Color::Red),
@@ -217,7 +215,7 @@ fn push_report(lines: &mut Vec<Line<'static>>, report: &ReviewReport) {
     }
 }
 
-fn push_finding(lines: &mut Vec<Line<'static>>, finding: &Finding) {
+fn push_finding(lines: &mut Vec<Line<'_>>, finding: &Finding) {
     let color = match finding.severity().as_str() {
         "critical" | "high" => Color::Red,
         "medium" => Color::Yellow,
