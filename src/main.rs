@@ -3,9 +3,10 @@ mod claude;
 mod models;
 mod review;
 mod state;
+mod store;
 mod widgets;
 
-use crate::state::State;
+use crate::state::{ReviewStatus, State};
 use crate::widgets::{DetailWidget, PrListWidget};
 use color_eyre::Result;
 use ratatui::Frame;
@@ -22,11 +23,24 @@ fn main() -> Result<()> {
 
     let prs = api::get_review_prs()?;
     let mut state = State::new(prs);
+    match store::load_reviews() {
+        Ok(saved) => state.reviews.extend(
+            saved
+                .into_iter()
+                .map(|(url, report)| (url, ReviewStatus::Done(report))),
+        ),
+        Err(error) => state.notice = Some(format!("could not load saved reviews: {error:#}")),
+    }
     let (tx, rx) = mpsc::channel();
 
     ratatui::run(|terminal| {
         loop {
             while let Ok(event) = rx.try_recv() {
+                if let review::ReviewEvent::Done { url, report } = &event
+                    && let Err(error) = store::save_review(url, report)
+                {
+                    state.notice = Some(format!("could not save review: {error:#}"));
+                }
                 state.apply(event);
             }
 

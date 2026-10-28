@@ -5,20 +5,12 @@ use std::process::Command;
 
 const PR_FIELDS: &str = "number,title,url,body,repository,author,isDraft,updatedAt";
 
-/// Open PRs where the user (and optionally teams in `DIFFY_TEAMS`) are
-/// requested for review. Multiple teams are comma-separated:
-/// `DIFFY_TEAMS="acme/backend,acme/frontend"`.
+/// Open PRs where the user and the configured teams are requested for review.
+/// Teams come from `~/.diffy/settings.json` (`{"teams": ["acme/backend"]}`),
+/// falling back to the comma-separated `DIFFY_TEAMS` variable.
 pub fn get_review_prs() -> Result<Vec<PullRequest>> {
     let mut targets = vec!["@me".to_string()];
-    if let Ok(teams) = env::var("DIFFY_TEAMS") {
-        targets.extend(
-            teams
-                .split(',')
-                .map(str::trim)
-                .filter(|team| !team.is_empty())
-                .map(str::to_string),
-        );
-    }
+    targets.extend(targets_from_teams(configured_teams()?));
     targets.dedup();
 
     let mut prs = Vec::new();
@@ -51,6 +43,26 @@ pub fn get_review_prs() -> Result<Vec<PullRequest>> {
         prs.append(&mut found);
     }
     Ok(prs)
+}
+
+fn configured_teams() -> Result<Vec<String>> {
+    let teams = crate::store::settings()?.teams;
+    if !teams.is_empty() {
+        return Ok(teams);
+    }
+    Ok(env::var("DIFFY_TEAMS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::to_string)
+        .collect())
+}
+
+fn targets_from_teams(teams: Vec<String>) -> Vec<String> {
+    teams
+        .into_iter()
+        .map(|team| team.trim().to_string())
+        .filter(|team| !team.is_empty())
+        .collect()
 }
 
 pub fn fetch_diff(pr: &PullRequest) -> Result<String> {

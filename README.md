@@ -34,11 +34,16 @@ Diffy looks for the review system prompt in this order:
 2. `./SYSTEM_PROMPT.md`
 3. `SYSTEM_PROMPT.md` next to the project at build time
 
-To include team review requests, set a comma-separated list:
+To include team review requests, list the teams in `~/.diffy/settings.json`:
 
-```sh
-DIFFY_TEAMS="acme/backend,acme/platform" cargo run --release
+```json
+{
+  "teams": ["acme/backend", "acme/platform"]
+}
 ```
+
+The file is optional; without it Diffy falls back to the comma-separated `DIFFY_TEAMS`
+variable. Settings are re-read on every refresh (`R`).
 
 By default Diffy asks GitHub for open PRs with `--review-requested=@me`. Each target is
 fetched with `gh search prs --limit 100`; results are deduplicated by URL and sorted by
@@ -92,15 +97,44 @@ The result pane shows the verdict, the judge's intent assessment, the combined s
 findings confirmed by both reviewers, single findings the judge accepted, and findings it
 dismissed with a reason.
 
-The whole flow is per-PR and stateless: changing the PR or restarting Diffy never loses
-anything because nothing is written to disk.
+## Saved reviews
+
+Every finished review is appended to `~/.diffy/reviews/reviews.jsonl` as one JSON object per
+line, and reloaded on the next start so past verdicts show up again in the PR list and the
+detail pane. The file is append-only; the newest line for a PR url wins. Failures are not
+saved.
+
+```json
+{"url":"https://github.com/acme/backend/pull/482","reviewed_at":1767225600,"report":{"verdict":"merge","summary":"…","intent":"…","confirmed":[],"accepted":[],"dismissed":[]}}
+```
+
+Useful one-liners against the log:
+
+```sh
+jq -s 'group_by(.url) | map(last) | sort_by(-.reviewed_at) | .[] | {url, verdict: .report.verdict}' \
+  ~/.diffy/reviews/reviews.jsonl
+```
+
+A saved review is keyed by PR url only, so a PR that receives new commits keeps showing its
+previous review until you run it again. Set `DIFFY_HOME` to keep these files somewhere else.
+
+Both files are plain `serde_json`, so nothing else is needed to read them.
 
 ## Configuration
 
+`~/.diffy/settings.json`:
+
+| Field | Meaning |
+| --- | --- |
+| `teams` | Teams whose review requests count as yours, e.g. `["acme/backend"]` |
+
+Environment:
+
 | Variable | Meaning |
 | --- | --- |
-| `DIFFY_TEAMS` | Comma-separated teams, e.g. `acme/backend,acme/platform` |
+| `DIFFY_TEAMS` | Comma-separated teams, used when `settings.json` has no teams |
 | `DIFFY_SYSTEM_PROMPT` | Path to an alternative system prompt file |
+| `DIFFY_HOME` | Directory for `settings.json` and `reviews/` (default `~/.diffy`) |
 
 Diffs larger than 120 000 characters are truncated in the initial prompt. The prompt tells
 the reviewers that they are seeing a partial diff and that they can fetch the rest with
@@ -127,6 +161,7 @@ src/
   state.rs                   UI state, selection, review status map
   review.rs                  reviewer council, finding matching, judge
   claude.rs                  headless Claude invocation, reviewer agent, JSON extraction
+  store.rs                   ~/.diffy settings and saved review log
   widgets/
     pr_list_widget.rs        repo-grouped PR list
     detail_widget.rs         PR details and review report
@@ -141,5 +176,5 @@ cargo clippy --all-targets
 cargo test
 ```
 
-The matching and JSON-parsing logic has unit tests; the Claude calls are not exercised in
-tests because they need credentials and cost money.
+The matching, JSON-parsing, and review-log logic has unit tests; the Claude calls are not
+exercised in tests because they need credentials and cost money.

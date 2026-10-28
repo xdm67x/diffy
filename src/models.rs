@@ -141,7 +141,8 @@ pub struct JudgeOutput {
     pub singles: Vec<JudgeDecision>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Verdict {
     Merge,
     RequestChanges,
@@ -156,7 +157,7 @@ impl From<&str> for Verdict {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReviewReport {
     pub verdict: Verdict,
     pub summary: String,
