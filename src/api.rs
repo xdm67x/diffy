@@ -1,7 +1,8 @@
 use crate::models::PullRequest;
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use std::env;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 const PR_FIELDS: &str = "number,title,url,body,repository,author,isDraft,updatedAt";
 
@@ -63,6 +64,60 @@ fn targets_from_teams(teams: Vec<String>) -> Vec<String> {
         .map(|team| team.trim().to_string())
         .filter(|team| !team.is_empty())
         .collect()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReviewAction {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+impl ReviewAction {
+    pub fn completed(self) -> &'static str {
+        match self {
+            ReviewAction::Approve => "approved",
+            ReviewAction::RequestChanges => "changes requested on",
+            ReviewAction::Comment => "commented on",
+        }
+    }
+
+    fn flag(self) -> &'static str {
+        match self {
+            ReviewAction::Approve => "--approve",
+            ReviewAction::RequestChanges => "--request-changes",
+            ReviewAction::Comment => "--comment",
+        }
+    }
+}
+
+/// Posts a review on the PR through `gh pr review`. The body goes through stdin
+/// so a long report does not hit argument length limits.
+pub fn submit_review(pr: &PullRequest, action: ReviewAction, body: &str) -> Result<()> {
+    let mut child = Command::new("gh")
+        .args(["pr", "review", &pr.url, action.flag(), "--body-file", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .wrap_err("failed to run `gh pr review`; is the GitHub CLI installed?")?;
+
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| eyre!("could not open gh stdin"))?
+        .write_all(body.as_bytes())
+        .wrap_err("could not write the review body to gh")?;
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(eyre!(
+            "gh pr review failed for {}: {}",
+            pr.url,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 pub fn fetch_diff(pr: &PullRequest) -> Result<String> {

@@ -8,13 +8,24 @@ use ratatui::widgets::{Block, Paragraph, Widget, Wrap};
 
 pub struct DetailWidget<'a> {
     pr: Option<&'a PullRequest>,
-    status: Option<&'a ReviewStatus>,
+    history: &'a [ReviewStatus],
+    offset: usize,
     scroll: u16,
 }
 
 impl<'a> DetailWidget<'a> {
-    pub fn new(pr: Option<&'a PullRequest>, status: Option<&'a ReviewStatus>, scroll: u16) -> Self {
-        Self { pr, status, scroll }
+    pub fn new(
+        pr: Option<&'a PullRequest>,
+        history: &'a [ReviewStatus],
+        offset: usize,
+        scroll: u16,
+    ) -> Self {
+        Self {
+            pr,
+            history,
+            offset,
+            scroll,
+        }
     }
 }
 
@@ -65,13 +76,17 @@ impl Widget for DetailWidget<'_> {
 
                 lines.push(Line::default());
                 lines.push(heading("Review"));
-                push_status(&mut lines, self.status);
+                push_review(&mut lines, self.history, self.offset);
                 lines.push(Line::default());
                 lines.push(Line::from(Span::styled(
                     "The reviewer council runs two independent reviewer agents in parallel \
                      with gh/git access to inspect the PR branch, then a judge confirms only \
                      issues both found and rules on the rest. The verdict checks the diff \
                      against the PR description.",
+                    Style::new().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "Press s to post the shown review to GitHub: approve, request changes, or comment.",
                     Style::new().fg(Color::DarkGray),
                 )));
             }
@@ -103,13 +118,32 @@ fn heading(text: &str) -> Line<'static> {
     ))
 }
 
-fn push_status(lines: &mut Vec<Line<'_>>, status: Option<&ReviewStatus>) {
-    match status {
-        None => lines.push(Line::from(Span::styled(
+fn push_review(lines: &mut Vec<Line<'_>>, history: &[ReviewStatus], offset: usize) {
+    if history.is_empty() {
+        lines.push(Line::from(Span::styled(
             "Not reviewed yet. Press Enter or r to run the review council.",
             Style::new().fg(Color::DarkGray),
-        ))),
-        Some(ReviewStatus::Running(stage)) => {
+        )));
+        return;
+    }
+    let index = history.len() - 1 - offset.min(history.len() - 1);
+    if history.len() > 1 {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Review {} of {}  ·  [ ] to switch between reviews",
+                index + 1,
+                history.len()
+            ),
+            Style::new().fg(Color::DarkGray),
+        )));
+        lines.push(Line::default());
+    }
+    push_status(lines, &history[index]);
+}
+
+fn push_status(lines: &mut Vec<Line<'_>>, status: &ReviewStatus) {
+    match status {
+        ReviewStatus::Running(stage) => {
             lines.push(Line::from(Span::styled(
                 format!("● {}", stage.label()),
                 Style::new().fg(Color::Yellow).bold(),
@@ -119,7 +153,7 @@ fn push_status(lines: &mut Vec<Line<'_>>, status: Option<&ReviewStatus>) {
                 Style::new().fg(Color::DarkGray),
             )));
         }
-        Some(ReviewStatus::Failed(error)) => {
+        ReviewStatus::Failed(error) => {
             lines.push(Line::from(Span::styled(
                 "✖ Review failed",
                 Style::new().fg(Color::Red).bold(),
@@ -131,7 +165,7 @@ fn push_status(lines: &mut Vec<Line<'_>>, status: Option<&ReviewStatus>) {
                 )));
             }
         }
-        Some(ReviewStatus::Done(report)) => push_report(lines, report),
+        ReviewStatus::Done(report) => push_report(lines, report),
     }
 }
 

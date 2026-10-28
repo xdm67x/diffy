@@ -47,9 +47,9 @@ struct StoredReview {
     report: ReviewReport,
 }
 
-// shortcut: reviews are keyed by PR url only, so a PR that gets new commits keeps
-// showing its old review; compare reviewed_at with updated_at if that matters.
-pub fn load_reviews() -> Result<HashMap<String, ReviewReport>> {
+// shortcut: reviews are keyed by PR url and never pruned, so a PR that gets new
+// commits keeps its old reviews; compare reviewed_at with updated_at if that matters.
+pub fn load_reviews() -> Result<HashMap<String, Vec<ReviewReport>>> {
     load_reviews_in(&base_dir()?)
 }
 
@@ -57,19 +57,22 @@ pub fn save_review(url: &str, report: &ReviewReport) -> Result<()> {
     save_review_in(&base_dir()?, url, report)
 }
 
-fn load_reviews_in(base: &Path) -> Result<HashMap<String, ReviewReport>> {
+fn load_reviews_in(base: &Path) -> Result<HashMap<String, Vec<ReviewReport>>> {
     let path = base.join(REVIEWS_FILE);
     if !path.exists() {
         return Ok(HashMap::new());
     }
     let raw = fs::read_to_string(&path)
         .wrap_err_with(|| format!("could not read reviews at {}", path.display()))?;
+    let mut reviews: HashMap<String, Vec<ReviewReport>> = HashMap::new();
     // A single corrupt line must not throw away the rest of the history.
-    Ok(raw
+    for stored in raw
         .lines()
         .filter_map(|line| serde_json::from_str::<StoredReview>(line).ok())
-        .map(|stored| (stored.url, stored.report))
-        .collect())
+    {
+        reviews.entry(stored.url).or_default().push(stored.report);
+    }
+    Ok(reviews)
 }
 
 fn save_review_in(base: &Path, url: &str, report: &ReviewReport) -> Result<()> {
@@ -127,18 +130,21 @@ mod tests {
     }
 
     #[test]
-    fn reviews_roundtrip_and_last_wins() {
+    fn reviews_roundtrip_keeps_every_attempt_in_order() {
         let base = temp_base("reviews");
         save_review_in(&base, "https://github.com/a/a/pull/1", &report("first")).unwrap();
         save_review_in(&base, "https://github.com/a/a/pull/1", &report("second")).unwrap();
+        save_review_in(&base, "https://github.com/a/a/pull/2", &report("other")).unwrap();
 
         let loaded = load_reviews_in(&base).unwrap();
-        assert_eq!(loaded.len(), 1);
-        let stored = &loaded["https://github.com/a/a/pull/1"];
-        assert_eq!(stored.summary, "second");
-        assert_eq!(stored.verdict, Verdict::RequestChanges);
-        assert_eq!(stored.confirmed.len(), 1);
-        assert_eq!(stored.dismissed[0].1, "speculation");
+        assert_eq!(loaded.len(), 2);
+        let history = &loaded["https://github.com/a/a/pull/1"];
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].summary, "first");
+        assert_eq!(history[1].summary, "second");
+        assert_eq!(history[1].verdict, Verdict::RequestChanges);
+        assert_eq!(history[1].confirmed.len(), 1);
+        assert_eq!(history[1].dismissed[0].1, "speculation");
         fs::remove_dir_all(&base).unwrap();
     }
 

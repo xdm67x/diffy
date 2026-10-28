@@ -1,8 +1,9 @@
+use crate::api::{self, ReviewAction};
 use crate::models::{PrGroup, PullRequest, ReviewReport, group_by_repo};
 use crate::review::{ReviewEvent, Stage};
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,7 @@ pub enum Row {
 
 pub struct Toast {
     pub message: String,
+    pub error: bool,
     expires: Instant,
 }
 
@@ -32,8 +34,12 @@ pub struct State {
     pub rows: Vec<Row>,
     pub selected_row: usize,
     pub list_state: ListState,
-    pub reviews: HashMap<String, ReviewStatus>,
-    pub active: Option<String>,
+    pub reviews: HashMap<String, Vec<ReviewStatus>>,
+    /// How many reviews back the detail pane shows; 0 is the newest.
+    pub review_offset: usize,
+    pub submit_mode: bool,
+    /// PR urls with a review running right now. One review per PR, any number at once.
+    pub active: HashSet<String>,
     pub detail_scroll: u16,
     pub toast: Option<Toast>,
     /// Repository filter, empty means every repo is shown.
@@ -52,7 +58,9 @@ impl State {
             selected_row: 0,
             list_state: ListState::default(),
             reviews: HashMap::new(),
-            active: None,
+            review_offset: 0,
+            submit_mode: false,
+            active: HashSet::new(),
             detail_scroll: 0,
             toast: None,
             filter: String::new(),
@@ -96,6 +104,8 @@ impl State {
             .iter()
             .position(|row| matches!(row, Row::Pr(_)))
             .unwrap_or(0);
+        self.review_offset = 0;
+        self.submit_mode = false;
         self.detail_scroll = 0;
     }
 
@@ -120,6 +130,15 @@ impl State {
     pub fn notify(&mut self, message: impl Into<String>) {
         self.toast = Some(Toast {
             message: message.into(),
+            error: true,
+            expires: Instant::now() + TOAST_LIFETIME,
+        });
+    }
+
+    pub fn notify_ok(&mut self, message: impl Into<String>) {
+        self.toast = Some(Toast {
+            message: message.into(),
+            error: false,
             expires: Instant::now() + TOAST_LIFETIME,
         });
     }
@@ -141,52 +160,138 @@ impl State {
         }
     }
 
-    pub fn review_status(&self, pr: &PullRequest) -> Option<&ReviewStatus> {
-        self.reviews.get(&pr.url)
+    /// Every review attempt for the PR, oldest first.
+    pub fn review_history(&self, pr: &PullRequest) -> &[ReviewStatus] {
+        self.reviews.get(&pr.url).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The review currently shown in the detail pane.
+    pub fn shown_status(&self, pr: &PullRequest) -> Option<&ReviewStatus> {
+        let history = self.review_history(pr);
+        history.get(history.len().checked_sub(1 + self.review_offset)?)
+    }
+
+    pub fn older_review(&mut self) {
+        if let Some(pr) = self.selected_pr()
+            && self.review_offset + 1 < self.review_history(pr).len()
+        {
+            self.review_offset += 1;
+            self.submit_mode = false;
+            self.detail_scroll = 0;
+        }
+    }
+
+    pub fn newer_review(&mut self) {
+        if self.review_offset > 0 {
+            self.review_offset -= 1;
+            self.submit_mode = false;
+            self.detail_scroll = 0;
+        }
+    }
+
+    /// Opens the submit prompt when the shown review is a finished one.
+    pub fn begin_submit(&mut self) -> bool {
+        let ready = match self.selected_pr() {
+            Some(pr) => matches!(self.shown_status(pr), Some(ReviewStatus::Done(_))),
+            None => false,
+        };
+        self.submit_mode = ready;
+        ready
+    }
+
+    /// Posts the shown review to GitHub. Blocking: `gh` takes about a second.
+    pub fn submit(&mut self, action: ReviewAction) {
+        self.submit_mode = false;
+        let Some(pr) = self.selected_pr().cloned() else {
+            return;
+        };
+        let body = match self.shown_status(&pr) {
+            Some(ReviewStatus::Done(report)) => report.to_markdown(),
+            _ => return,
+        };
+        match api::submit_review(&pr, action, &body) {
+            Ok(()) => self.notify_ok(format!(
+                "{} {}#{}",
+                action.completed(),
+                pr.repo_name(),
+                pr.number
+            )),
+            Err(error) => self.notify(format!("could not post review: {error:#}")),
+        }
     }
 
     pub fn begin_review(&mut self) -> Option<PullRequest> {
-        if self.active.is_some() {
+        let pr = self.selected_pr()?.clone();
+        if !self.active.insert(pr.url.clone()) {
             return None;
         }
-        let pr = self.selected_pr()?.clone();
-        self.active = Some(pr.url.clone());
         self.reviews
-            .insert(pr.url.clone(), ReviewStatus::Running(Stage::FetchingDiff));
+            .entry(pr.url.clone())
+            .or_default()
+            .push(ReviewStatus::Running(Stage::FetchingDiff));
+        self.review_offset = 0;
+        self.submit_mode = false;
         self.detail_scroll = 0;
         Some(pr)
     }
 
     pub fn spawn_review(&mut self, tx: &Sender<ReviewEvent>) {
-        if let Some(pr) = self.begin_review() {
-            crate::review::spawn(pr, tx.clone());
+        if self.selected_pr().is_none() {
+            return;
+        }
+        match self.begin_review() {
+            Some(pr) => crate::review::spawn(pr, tx.clone()),
+            None => self.notify("this PR is already being reviewed"),
         }
     }
 
     pub fn apply(&mut self, event: ReviewEvent) {
         match event {
             ReviewEvent::Stage { url, stage } => {
-                if self.active.as_deref() == Some(url.as_str()) {
-                    self.reviews.insert(url, ReviewStatus::Running(stage));
+                if self.active.contains(&url)
+                    && let Some(last) = self.reviews.entry(url).or_default().last_mut()
+                {
+                    *last = ReviewStatus::Running(stage);
                 }
             }
             ReviewEvent::Done { url, report } => {
-                if self.active.as_deref() == Some(url.as_str()) {
-                    self.active = None;
+                self.active.remove(&url);
+                let selected = self.selected_pr().is_some_and(|pr| pr.url == url);
+                self.settle_review(url, ReviewStatus::Done(report));
+                if selected {
+                    self.review_offset = 0;
+                    self.detail_scroll = 0;
                 }
-                self.reviews.insert(url, ReviewStatus::Done(report));
-                self.detail_scroll = 0;
             }
             ReviewEvent::Failed { url, error } => {
-                if self.active.as_deref() == Some(url.as_str()) {
-                    self.active = None;
+                self.active.remove(&url);
+                let selected = self.selected_pr().is_some_and(|pr| pr.url == url);
+                let label = self.label_for(&url);
+                self.settle_review(url, ReviewStatus::Failed(error.clone()));
+                self.notify(format!("review of {label} failed: {error}"));
+                if selected {
+                    self.review_offset = 0;
+                    self.detail_scroll = 0;
                 }
-                self.reviews
-                    .insert(url, ReviewStatus::Failed(error.clone()));
-                self.notify(format!("review failed: {error}"));
-                self.detail_scroll = 0;
             }
         }
+    }
+
+    fn label_for(&self, url: &str) -> String {
+        self.prs
+            .iter()
+            .find(|pr| pr.url == url)
+            .map(|pr| format!("{}#{}", pr.repo_name(), pr.number))
+            .unwrap_or_else(|| url.to_string())
+    }
+
+    /// Replaces the running attempt, or appends when the event has no matching attempt.
+    fn settle_review(&mut self, url: String, status: ReviewStatus) {
+        let history = self.reviews.entry(url).or_default();
+        if matches!(history.last(), Some(ReviewStatus::Running(_))) {
+            history.pop();
+        }
+        history.push(status);
     }
 
     pub fn select_next(&mut self) {
@@ -228,6 +333,8 @@ impl State {
     fn set_selected(&mut self, index: usize) {
         if index != self.selected_row {
             self.selected_row = index;
+            self.review_offset = 0;
+            self.submit_mode = false;
             self.detail_scroll = 0;
         }
     }
@@ -240,7 +347,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Author, Repository};
+    use crate::models::{Author, Repository, Verdict};
 
     fn pr(number: u64, repo: &str) -> PullRequest {
         PullRequest {
@@ -255,6 +362,117 @@ mod tests {
             is_draft: false,
             updated_at: String::new(),
         }
+    }
+
+    fn report(summary: &str) -> ReviewReport {
+        ReviewReport {
+            verdict: Verdict::Merge,
+            summary: summary.to_string(),
+            intent: String::new(),
+            confirmed: Vec::new(),
+            accepted: Vec::new(),
+            dismissed: Vec::new(),
+        }
+    }
+
+    fn finish(state: &mut State, url: &str, summary: &str) {
+        state.apply(ReviewEvent::Done {
+            url: url.to_string(),
+            report: report(summary),
+        });
+    }
+
+    #[test]
+    fn every_review_is_kept_and_the_detail_pane_steps_back() {
+        let mut state = State::new(vec![pr(1, "acme/api")]);
+        let pull = state.selected_pr().unwrap().clone();
+
+        assert!(state.begin_review().is_some());
+        assert!(matches!(
+            state.shown_status(&pull),
+            Some(ReviewStatus::Running(_))
+        ));
+        finish(&mut state, &pull.url, "one");
+        assert!(state.begin_review().is_some());
+        finish(&mut state, &pull.url, "two");
+
+        assert_eq!(state.review_history(&pull).len(), 2);
+        assert!(matches!(
+            state.shown_status(&pull),
+            Some(ReviewStatus::Done(report)) if report.summary == "two"
+        ));
+
+        state.older_review();
+        assert!(matches!(
+            state.shown_status(&pull),
+            Some(ReviewStatus::Done(report)) if report.summary == "one"
+        ));
+        assert!(state.begin_submit());
+
+        state.older_review();
+        assert_eq!(state.review_offset, 1, "cannot step past the oldest review");
+        state.newer_review();
+        assert_eq!(state.review_offset, 0);
+        state.newer_review();
+        assert_eq!(state.review_offset, 0, "cannot step past the newest review");
+    }
+
+    #[test]
+    fn different_prs_review_concurrently_but_a_pr_reviews_once() {
+        let mut state = State::new(vec![pr(1, "acme/api"), pr(2, "acme/web")]);
+        let first = state.selected_pr().unwrap().clone();
+        assert!(state.begin_review().is_some());
+        assert!(
+            state.begin_review().is_none(),
+            "same PR must not start twice"
+        );
+
+        state.select_next();
+        let second = state.selected_pr().unwrap().clone();
+        assert_ne!(first.url, second.url);
+        assert!(state.begin_review().is_some());
+        assert_eq!(state.active.len(), 2);
+        assert!(matches!(
+            state.shown_status(&first),
+            Some(ReviewStatus::Running(_))
+        ));
+        assert!(matches!(
+            state.shown_status(&second),
+            Some(ReviewStatus::Running(_))
+        ));
+
+        finish(&mut state, &first.url, "first done");
+        assert_eq!(state.active.len(), 1);
+        assert!(state.active.contains(&second.url));
+        assert!(matches!(
+            state.shown_status(&first),
+            Some(ReviewStatus::Done(report)) if report.summary == "first done"
+        ));
+        assert!(matches!(
+            state.shown_status(&second),
+            Some(ReviewStatus::Running(_))
+        ));
+
+        finish(&mut state, &second.url, "second done");
+        assert!(state.active.is_empty());
+        assert_eq!(state.review_history(&first).len(), 1);
+        assert_eq!(state.review_history(&second).len(), 1);
+    }
+
+    #[test]
+    fn failed_attempt_replaces_the_running_one() {
+        let mut state = State::new(vec![pr(1, "acme/api")]);
+        let pull = state.selected_pr().unwrap().clone();
+        state.begin_review().unwrap();
+        state.apply(ReviewEvent::Failed {
+            url: pull.url.clone(),
+            error: "gh failed".to_string(),
+        });
+
+        let history = state.review_history(&pull);
+        assert_eq!(history.len(), 1);
+        assert!(matches!(history[0], ReviewStatus::Failed(_)));
+        assert!(!state.begin_submit());
     }
 
     #[test]

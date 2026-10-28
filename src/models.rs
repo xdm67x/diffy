@@ -170,6 +170,44 @@ pub struct ReviewReport {
     pub dismissed: Vec<(Finding, String)>,
 }
 
+impl ReviewReport {
+    /// Markdown body posted to GitHub when the review is submitted.
+    pub fn to_markdown(&self) -> String {
+        let verdict = match self.verdict {
+            Verdict::Merge => "approve",
+            Verdict::RequestChanges => "request changes",
+        };
+        let mut out = format!("## Diffy review: {verdict}\n\n");
+
+        if !self.summary.trim().is_empty() {
+            out.push_str(self.summary.trim());
+            out.push_str("\n\n");
+        }
+        if !self.intent.trim().is_empty() {
+            out.push_str(&format!("**Intent:** {}\n\n", self.intent.trim()));
+        }
+
+        let findings: Vec<&Finding> = self.confirmed.iter().chain(&self.accepted).collect();
+        if findings.is_empty() {
+            out.push_str("No blocking findings.\n");
+        } else {
+            out.push_str(&format!("### Findings ({})\n\n", findings.len()));
+            for finding in findings {
+                out.push_str(&format!(
+                    "- **{}** `{}` — {}\n",
+                    finding.severity().to_uppercase(),
+                    finding.location(),
+                    finding.title
+                ));
+                for line in finding.detail.lines() {
+                    out.push_str(&format!("  {line}\n"));
+                }
+            }
+        }
+        out
+    }
+}
+
 fn de_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: Deserializer<'de>,
@@ -251,6 +289,30 @@ mod tests {
         let decision: JudgeDecision =
             serde_json::from_str(r#"{"index":"S2","relevant":true}"#).unwrap();
         assert_eq!(decision.index, 2);
+    }
+
+    #[test]
+    fn markdown_body_carries_verdict_and_actionable_findings() {
+        let report = ReviewReport {
+            verdict: Verdict::RequestChanges,
+            summary: "needs work".to_string(),
+            intent: "partially implemented".to_string(),
+            confirmed: vec![Finding {
+                file: "src/db.rs".to_string(),
+                line: Some(7),
+                severity: "high".to_string(),
+                title: "SQL injection".to_string(),
+                detail: "user input is concatenated".to_string(),
+                intent_related: true,
+            }],
+            accepted: Vec::new(),
+            dismissed: vec![(Finding::default(), "speculation".to_string())],
+        };
+        let body = report.to_markdown();
+        assert!(body.starts_with("## Diffy review: request changes"));
+        assert!(body.contains("`src/db.rs:7`"));
+        assert!(body.contains("SQL injection"));
+        assert!(!body.contains("speculation"));
     }
 
     #[test]

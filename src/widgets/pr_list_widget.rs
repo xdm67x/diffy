@@ -10,7 +10,7 @@ use std::collections::HashMap;
 pub struct PrListWidget<'a> {
     rows: &'a [Row],
     prs: &'a [PullRequest],
-    reviews: &'a HashMap<String, ReviewStatus>,
+    reviews: &'a HashMap<String, Vec<ReviewStatus>>,
     selected_row: usize,
 }
 
@@ -18,7 +18,7 @@ impl<'a> PrListWidget<'a> {
     pub fn new(
         rows: &'a [Row],
         prs: &'a [PullRequest],
-        reviews: &'a HashMap<String, ReviewStatus>,
+        reviews: &'a HashMap<String, Vec<ReviewStatus>>,
         selected_row: usize,
     ) -> Self {
         Self {
@@ -54,23 +54,24 @@ impl StatefulWidget for PrListWidget<'_> {
                     let Some(pr) = self.prs.get(*pr_index) else {
                         continue;
                     };
-                    let (marker, color, status) = match self.reviews.get(&pr.url) {
-                        None => ("○", Color::DarkGray, "not reviewed".to_string()),
-                        Some(ReviewStatus::Running(stage)) => {
-                            ("●", Color::Yellow, stage.label().to_string())
-                        }
-                        Some(ReviewStatus::Done(report)) => match report.verdict {
-                            crate::models::Verdict::Merge => {
-                                ("✔", Color::Green, "merge".to_string())
+                    let (marker, color, status) =
+                        match self.reviews.get(&pr.url).and_then(|history| history.last()) {
+                            None => ("○", Color::DarkGray, "not reviewed".to_string()),
+                            Some(ReviewStatus::Running(stage)) => {
+                                ("●", Color::Yellow, stage.label().to_string())
                             }
-                            crate::models::Verdict::RequestChanges => {
-                                ("✖", Color::Red, "changes requested".to_string())
+                            Some(ReviewStatus::Done(report)) => match report.verdict {
+                                crate::models::Verdict::Merge => {
+                                    ("✔", Color::Green, "merge".to_string())
+                                }
+                                crate::models::Verdict::RequestChanges => {
+                                    ("✖", Color::Red, "changes requested".to_string())
+                                }
+                            },
+                            Some(ReviewStatus::Failed(_)) => {
+                                ("✖", Color::Red, "review failed".to_string())
                             }
-                        },
-                        Some(ReviewStatus::Failed(_)) => {
-                            ("✖", Color::Red, "review failed".to_string())
-                        }
-                    };
+                        };
 
                     let mut spans = vec![
                         Span::styled(format!("{marker} "), Style::new().fg(color)),

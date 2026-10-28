@@ -3,7 +3,9 @@
 Diffy is a terminal UI for reviewing the pull requests that are waiting on **you**.
 It finds open PRs where you (or your team) are requested as a reviewer via the GitHub
 CLI, groups them by repository, and runs a two-reviewer + judge AI review for the PR you
-select.
+select. Several PRs can be reviewed at the same time, each run is kept in that PR's review
+history so you can run it again after new commits and compare, and you can post a review to
+GitHub as an approval, a request for changes, or a comment.
 
 ```
 ┌ Diffy ──────────────────────────────────────────────────────────────┐
@@ -55,7 +57,9 @@ repository and PR number.
 | `k` / `↑` | Previous PR |
 | `g` / `Home` | First PR |
 | `G` / `End` | Last PR |
-| `Enter` / `r` | Run the review council on the selected PR |
+| `Enter` / `r` | Run the review council on the selected PR (a new attempt is added to its history) |
+| `[` / `]` | Show an older / newer review of the selected PR |
+| `s` | Post the shown review to GitHub, then `a` approve, `r` request changes, `c` comment, `Esc` cancel |
 | `J` / `PageDown` | Scroll the detail pane down |
 | `K` / `PageUp` | Scroll the detail pane up |
 | Mouse wheel | Scroll the detail pane, or move the selection over the list |
@@ -68,13 +72,22 @@ The repository filter only hides rows. Every fetched PR stays loaded, so clearin
 filter brings all of your review requests back. Errors (failed refresh, review, or save)
 appear as a toast in the bottom-right corner and disappear on their own.
 
-Only one review runs at a time. The list and detail pane update live as the review moves
-through its stages.
+Reviews run per PR and concurrently: press `Enter` on one PR, move to another, press
+`Enter` again, and both run as independent instances. The header shows how many reviews
+are running, and each list row tracks its own PR's stage. A PR is never reviewed twice at
+the same time; `Enter` on a PR that is already running only shows a toast. A finished review
+of a PR you are reading resets the pane to the result; a background PR finishing does not
+disturb what you are looking at.
+
+Every run is a new attempt appended to that PR's history. The detail pane shows
+`Review 2 of 3` and `[`/`]` steps through them, and the list row always reflects the newest
+attempt, including a failed one.
 
 ## How a review works
 
 Diffy fetches the PR diff with `gh pr diff` and sends the title, description, and diff to
-three separate headless Claude Opus sessions. `SYSTEM_PROMPT.md` is passed to every session
+three separate headless Claude Opus sessions. Each review is its own set of processes, so
+several PRs can be in flight at once. `SYSTEM_PROMPT.md` is passed to every session
 as its system prompt (`claude --system-prompt`), so the review protocol lives in one
 versioned file. Sessions are not persisted.
 
@@ -102,12 +115,24 @@ The result pane shows the verdict, the judge's intent assessment, the combined s
 findings confirmed by both reviewers, single findings the judge accepted, and findings it
 dismissed with a reason.
 
+## Posting a review to GitHub
+
+Press `s` on a finished review to open the submit prompt, then `a`, `r`, or `c`. Diffy posts
+the review with `gh pr review --approve | --request-changes | --comment`, using the report
+the detail pane is showing as the review body: the verdict, the summary, the intent
+assessment, and the confirmed and judge-accepted findings. Dismissed findings are left out.
+The body goes to `gh` through stdin, so its length is not limited by the command line.
+
+Nothing is posted without that second key press, and a failure (for example GitHub refusing
+an approval on a PR you authored) shows up as an error toast. Diffy does not record which
+reviews were posted, so posting the same report twice creates two GitHub reviews.
+
 ## Saved reviews
 
 Every finished review is appended to `~/.diffy/reviews/reviews.jsonl` as one JSON object per
 line, and reloaded on the next start so past verdicts show up again in the PR list and the
-detail pane. The file is append-only; the newest line for a PR url wins. Failures are not
-saved.
+detail pane. The file is append-only, and every line for a PR url is kept, oldest first. A
+failed attempt is shown for the session but not saved.
 
 ```json
 {"url":"https://github.com/acme/backend/pull/482","reviewed_at":1767225600,"report":{"verdict":"merge","summary":"…","intent":"…","confirmed":[],"accepted":[],"dismissed":[]}}
@@ -120,8 +145,8 @@ jq -s 'group_by(.url) | map(last) | sort_by(-.reviewed_at) | .[] | {url, verdict
   ~/.diffy/reviews/reviews.jsonl
 ```
 
-A saved review is keyed by PR url only, so a PR that receives new commits keeps showing its
-previous review until you run it again. Set `DIFFY_HOME` to keep these files somewhere else.
+Reviews are keyed by PR url only, so a PR that receives new commits keeps showing its
+previous reviews until you run it again. Set `DIFFY_HOME` to keep these files somewhere else.
 
 Both files are plain `serde_json`, so nothing else is needed to read them.
 
@@ -148,7 +173,8 @@ the reviewers that they are seeing a partial diff and that they can fetch the re
 ## Privacy and tool safety
 
 The selected PR's title, description, author, diff, and any repository files a reviewer
-chooses to read are sent to Anthropic through the Claude Code CLI.
+chooses to read are sent to Anthropic through the Claude Code CLI. A posted review sends the
+report text to GitHub.
 
 Claude runs commands as your user. The allowlist and system prompt reduce accidental
 writes (temporary clones only, no builds or tests), but this is **not a sandbox or a

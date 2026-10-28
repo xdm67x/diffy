@@ -6,7 +6,7 @@ mod state;
 mod store;
 mod widgets;
 
-use crate::state::{ReviewStatus, State};
+use crate::state::{ReviewStatus, State, Toast};
 use crate::widgets::{DetailWidget, PrListWidget};
 use color_eyre::Result;
 use ratatui::Frame;
@@ -29,7 +29,7 @@ fn main() -> Result<()> {
         Ok(saved) => state.reviews.extend(
             saved
                 .into_iter()
-                .map(|(url, report)| (url, ReviewStatus::Done(report))),
+                .map(|(url, reports)| (url, reports.into_iter().map(ReviewStatus::Done).collect())),
         ),
         Err(error) => state.notify(format!("could not load saved reviews: {error:#}")),
     }
@@ -73,6 +73,21 @@ fn main() -> Result<()> {
                         continue;
                     }
 
+                    if state.submit_mode {
+                        match key.code {
+                            KeyCode::Char('a') => {
+                                state.submit(api::ReviewAction::Approve);
+                            }
+                            KeyCode::Char('r') => {
+                                state.submit(api::ReviewAction::RequestChanges);
+                            }
+                            KeyCode::Char('c') => state.submit(api::ReviewAction::Comment),
+                            KeyCode::Esc => state.submit_mode = false,
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                         KeyCode::Char('j') | KeyCode::Down => state.select_next(),
@@ -83,6 +98,13 @@ fn main() -> Result<()> {
                         KeyCode::Char('K') | KeyCode::PageUp => state.scroll_detail(-5),
                         KeyCode::Char('/') => state.filter_input = true,
                         KeyCode::Char('c') => state.clear_filter(),
+                        KeyCode::Char('[') => state.older_review(),
+                        KeyCode::Char(']') => state.newer_review(),
+                        KeyCode::Char('s') => {
+                            if !state.begin_submit() {
+                                state.notify("run a review first: there is nothing to post");
+                            }
+                        }
                         KeyCode::Enter | KeyCode::Char('r') => state.spawn_review(&tx),
                         KeyCode::Char('R') => match api::get_review_prs() {
                             Ok(prs) => {
@@ -154,9 +176,13 @@ fn render(frame: &mut Frame, state: &mut State) {
             Style::new().fg(Color::White),
         ),
     ];
-    if state.active.is_some() {
+    if !state.active.is_empty() {
         header.push(Span::styled(
-            "  ● review running",
+            format!(
+                "  ● {} review{} running",
+                state.active.len(),
+                plural(state.active.len())
+            ),
             Style::new().fg(Color::Yellow),
         ));
     }
@@ -177,16 +203,19 @@ fn render(frame: &mut Frame, state: &mut State) {
     state.list_state = list_state;
 
     let pr = state.selected_pr();
-    let status = pr.and_then(|pr| state.review_status(pr));
+    let history = pr.map(|pr| state.review_history(pr)).unwrap_or(&[]);
     frame.render_widget(
-        DetailWidget::new(pr, status, state.detail_scroll),
+        DetailWidget::new(pr, history, state.review_offset, state.detail_scroll),
         detail_area,
     );
 
-    let help = if state.filter_input {
+    let help = if state.submit_mode {
+        " post the shown review to GitHub:   a approve   r request changes   c comment   Esc cancel"
+            .to_string()
+    } else if state.filter_input {
         " repo filter: type to filter   Enter apply   Esc cancel   Backspace delete".to_string()
     } else {
-        " j/k move   / filter repos   Enter/r review   J/K or wheel scroll   R refresh   q quit"
+        " j/k move   / filter   Enter/r review   [ ] review history   s post review   J/K scroll   R refresh   q quit"
             .to_string()
     };
     frame.render_widget(
@@ -198,11 +227,17 @@ fn render(frame: &mut Frame, state: &mut State) {
     );
 
     if let Some(toast) = &state.toast {
-        render_toast(frame, body_area, &toast.message);
+        render_toast(frame, body_area, toast);
     }
 }
 
-fn render_toast(frame: &mut Frame, area: Rect, message: &str) {
+fn render_toast(frame: &mut Frame, area: Rect, toast: &Toast) {
+    let (title, color) = if toast.error {
+        (" Error ", Color::Red)
+    } else {
+        (" Done ", Color::Green)
+    };
+    let message = toast.message.as_str();
     let width = area.width.saturating_sub(4).clamp(8, 76).min(area.width);
     let text_width = width.saturating_sub(4).max(1) as usize;
     let mut height: u16 = 2;
@@ -220,12 +255,12 @@ fn render_toast(frame: &mut Frame, area: Rect, message: &str) {
     frame.render_widget(
         Paragraph::new(message.to_string())
             .wrap(Wrap { trim: false })
-            .style(Style::new().fg(Color::Red))
+            .style(Style::new().fg(color))
             .block(
                 Block::bordered()
-                    .title(" Error ")
-                    .title_style(Style::new().fg(Color::Red).bold())
-                    .border_style(Style::new().fg(Color::Red)),
+                    .title(title)
+                    .title_style(Style::new().fg(color).bold())
+                    .border_style(Style::new().fg(color)),
             ),
         toast_area,
     );
