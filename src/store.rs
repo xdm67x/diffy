@@ -128,6 +128,7 @@ mod tests {
                 title: "panic on empty input".to_string(),
                 detail: "unwrap on None".to_string(),
                 intent_related: true,
+                ..Finding::default()
             }],
             accepted: Vec::new(),
             dismissed: vec![(Finding::default(), "speculation".to_string())],

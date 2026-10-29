@@ -155,10 +155,12 @@ dismissed are listed after those with the reason.
 The **Comment**, **Request changes**, and **Approve** buttons in the review header act on the
 finished review currently shown. Diffy posts it with
 `gh pr review --approve | --request-changes | --comment`, using that report as the review
-body: the verdict, the summary, the intent assessment, and the confirmed and judge-accepted
-findings. Dismissed findings are left out. The confirmation dialog shows that body in a
-text field, and whatever it holds when you confirm is what gets posted. The body goes to
-`gh` through stdin, so its length is not limited by the command line.
+body: a short summary, the confirmed and judge-accepted findings worst first, and the
+verdict at the end. Dismissed findings are left out. A finding whose fix is a one-line
+replacement is also posted as an inline GitHub suggestion through `gh api`, when the line
+is part of the diff. The confirmation dialog shows the body in a text field, and whatever
+it holds when you confirm is what gets posted. The body goes to `gh` through stdin, so its
+length is not limited by the command line.
 
 Nothing is posted before you confirm the dialog, and a failure (for example GitHub refusing
 an approval on a PR you authored) shows up in the status bar. Diffy does not record which

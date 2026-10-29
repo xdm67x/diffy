@@ -105,6 +105,10 @@ pub struct Finding {
     pub title: String,
     #[serde(default)]
     pub detail: String,
+    /// Exact replacement for the single line at `line`, when the reviewer
+    /// proposed one. Posted to GitHub as an inline suggestion.
+    #[serde(default)]
+    pub suggestion: Option<String>,
     #[serde(default)]
     pub intent_related: bool,
 }
@@ -134,6 +138,33 @@ impl Finding {
             "low" => 2,
             _ => 3,
         }
+    }
+
+    pub fn severity_label(&self) -> &'static str {
+        match self.severity_rank() {
+            0 => "High",
+            1 => "Medium",
+            2 => "Low",
+            _ => "Other",
+        }
+    }
+
+    /// A one-line code fix that GitHub can apply, or `None` when the reviewer
+    /// gave none (or gave something that spans lines and needs a human).
+    pub fn suggestion_text(&self) -> Option<&str> {
+        let suggestion = self.suggestion.as_deref()?.trim();
+        (!suggestion.is_empty() && !suggestion.contains('\n')).then_some(suggestion)
+    }
+
+    /// `High · `src/db.rs:7` · SQL injection`, the compact heading of an
+    /// actionable finding in the posted review.
+    pub fn heading(&self) -> String {
+        let mut parts = vec![self.severity_label().to_string()];
+        if !self.file.trim().is_empty() {
+            parts.push(format!("`{}`", self.location()));
+        }
+        parts.push(self.title.trim().to_string());
+        parts.join(" · ")
     }
 }
 
@@ -190,99 +221,48 @@ pub struct ReviewReport {
 
 impl ReviewReport {
     /// Markdown body posted to GitHub when the review is submitted. Written for a
-    /// human skimming the PR: verdict first, then findings worst-first.
+    /// human skimming the PR: a short summary, findings worst first, verdict last.
     pub fn to_markdown(&self) -> String {
-        let (emoji, verdict) = match self.verdict {
-            Verdict::Merge => ("✅", "Approve"),
-            Verdict::RequestChanges => ("❌", "Request changes"),
-        };
-        let findings: Vec<(&Finding, &str)> = self
-            .confirmed
-            .iter()
-            .map(|finding| (finding, "reported by both reviewers"))
-            .chain(
-                self.accepted
-                    .iter()
-                    .map(|finding| (finding, "accepted by the judge")),
-            )
-            .collect();
+        let mut findings: Vec<&Finding> =
+            self.confirmed.iter().chain(self.accepted.iter()).collect();
+        findings.sort_by_key(|finding| finding.severity_rank());
 
-        let mut out = format!("## {emoji} Diffy review: {verdict}\n\n");
+        let mut out = String::from("## Diffy review\n\n");
         if !self.summary.trim().is_empty() {
             out.push_str(self.summary.trim());
             out.push_str("\n\n");
         }
-        if !self.intent.trim().is_empty() {
-            out.push_str(&format!("> **Intent:** {}\n\n", self.intent.trim()));
+        if self.verdict == Verdict::RequestChanges && !self.intent.trim().is_empty() {
+            out.push_str(&format!("On intent: {}\n\n", self.intent.trim()));
         }
 
-        if findings.is_empty() {
-            out.push_str("No blocking findings.\n");
-        } else {
-            out.push_str(&format!(
-                "**{} {} to address**\n",
-                findings.len(),
-                if findings.len() == 1 {
-                    "finding"
-                } else {
-                    "findings"
-                }
-            ));
-            for (label, group) in severity_groups(&findings) {
-                out.push_str(&format!("\n#### {label}\n\n"));
-                for (finding, source) in group {
-                    out.push_str(&format!(
-                        "1. **{}** — `{}`\n",
-                        finding.title.trim(),
-                        finding.location()
-                    ));
-                    for line in finding.detail.trim().lines() {
-                        out.push_str(&format!("   {line}\n"));
-                    }
-                    out.push_str(&format!("   <sub>{source}</sub>\n"));
-                }
+        for finding in &findings {
+            out.push_str(&format!("**{}**\n\n", finding.heading()));
+            if !finding.detail.trim().is_empty() {
+                out.push_str(finding.detail.trim());
+                out.push_str("\n\n");
             }
+        }
+
+        if findings.is_empty() && self.summary.trim().is_empty() {
+            out.push_str("No blocking findings.\n\n");
         }
 
         let dismissed = self.dismissed.len();
         if dismissed > 0 {
             out.push_str(&format!(
-                "\n---\n\n<sub>{dismissed} other finding{} filtered out as not relevant.</sub>\n",
+                "<sub>{dismissed} finding{} filtered out as not relevant.</sub>\n\n",
                 if dismissed == 1 { "" } else { "s" }
             ));
         }
+
+        out.push_str("---\n\n");
+        out.push_str(match self.verdict {
+            Verdict::Merge => "**Verdict: approve**\n",
+            Verdict::RequestChanges => "**Verdict: request changes**\n",
+        });
         out
     }
-}
-
-/// Findings grouped high → medium → low → anything else, worst first.
-fn severity_groups<'a>(
-    findings: &[(&'a Finding, &'a str)],
-) -> Vec<(&'static str, Vec<(&'a Finding, &'a str)>)> {
-    let mut groups = Vec::new();
-    for (severity, label) in [
-        ("high", "🔴 High severity"),
-        ("medium", "🟠 Medium severity"),
-        ("low", "🟡 Low severity"),
-        ("", "⚪ Other"),
-    ] {
-        let group: Vec<_> = findings
-            .iter()
-            .copied()
-            .filter(|(finding, _)| {
-                let actual = finding.severity();
-                if severity.is_empty() {
-                    !matches!(actual.as_str(), "high" | "medium" | "low")
-                } else {
-                    actual == severity
-                }
-            })
-            .collect();
-        if !group.is_empty() {
-            groups.push((label, group));
-        }
-    }
-    groups
 }
 
 fn de_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -370,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_body_carries_verdict_and_actionable_findings() {
+    fn markdown_body_is_short_with_verdict_last() {
         let report = ReviewReport {
             verdict: Verdict::RequestChanges,
             summary: "needs work".to_string(),
@@ -382,20 +362,21 @@ mod tests {
                 title: "SQL injection".to_string(),
                 detail: "user input is concatenated".to_string(),
                 intent_related: true,
+                ..Finding::default()
             }],
             accepted: Vec::new(),
             dismissed: vec![(Finding::default(), "speculation".to_string())],
         };
         let body = report.to_markdown();
-        assert!(body.starts_with("## ❌ Diffy review: Request changes"));
-        assert!(body.contains("> **Intent:** partially implemented"));
-        assert!(body.contains("**1 finding to address**"));
-        assert!(body.contains("#### 🔴 High severity"));
-        assert!(body.contains("1. **SQL injection** — `src/db.rs:7`"));
-        assert!(body.contains("   user input is concatenated"));
-        assert!(body.contains("<sub>reported by both reviewers</sub>"));
-        assert!(body.contains("<sub>1 other finding filtered out as not relevant.</sub>"));
+        assert!(body.starts_with("## Diffy review\n\nneeds work"));
+        assert!(!body.starts_with("## Diffy review:"));
+        assert!(body.contains("On intent: partially implemented"));
+        assert!(body.contains("**High · `src/db.rs:7` · SQL injection**"));
+        assert!(body.contains("user input is concatenated"));
+        assert!(!body.contains("reported by both reviewers"));
+        assert!(body.contains("<sub>1 finding filtered out as not relevant.</sub>"));
         assert!(!body.contains("speculation"));
+        assert!(body.trim_end().ends_with("**Verdict: request changes**"));
     }
 
     #[test]
@@ -409,22 +390,25 @@ mod tests {
         let report = ReviewReport {
             verdict: Verdict::Merge,
             summary: String::new(),
-            intent: String::new(),
+            intent: "fine".to_string(),
             confirmed: vec![finding("low", "c.rs"), finding("weird", "d.rs")],
             accepted: vec![finding("high", "a.rs")],
             dismissed: Vec::new(),
         };
         let body = report.to_markdown();
         let order: Vec<usize> = [
-            "#### 🔴 High severity",
-            "#### 🟡 Low severity",
-            "#### ⚪ Other",
+            "**High · `a.rs` · high**",
+            "**Low · `c.rs` · low**",
+            "**Other · `d.rs` · weird**",
         ]
         .iter()
-        .map(|heading| body.find(heading).expect("missing severity heading"))
+        .map(|heading| body.find(heading).expect("missing finding heading"))
         .collect();
         assert!(order.is_sorted());
-        assert!(body.contains("`a.rs`") && body.contains("`c.rs`") && body.contains("`d.rs`"));
+        assert!(
+            !body.contains("On intent: fine"),
+            "intent only matters when changes are requested"
+        );
 
         let clean = ReviewReport {
             verdict: Verdict::Merge,
@@ -435,9 +419,27 @@ mod tests {
             dismissed: Vec::new(),
         }
         .to_markdown();
-        assert!(clean.starts_with("## ✅ Diffy review: Approve"));
-        assert!(clean.contains("No blocking findings."));
+        assert!(clean.starts_with("## Diffy review\n\nship it"));
         assert!(!clean.contains("filtered out"));
+        assert!(clean.trim_end().ends_with("**Verdict: approve**"));
+    }
+
+    #[test]
+    fn only_single_line_suggestions_are_postable() {
+        let finding = |suggestion: Option<&str>| Finding {
+            suggestion: suggestion.map(str::to_string),
+            ..Finding::default()
+        };
+        assert_eq!(
+            finding(Some("  let x = 1;  ")).suggestion_text(),
+            Some("let x = 1;")
+        );
+        assert_eq!(
+            finding(Some("let x = 1;\nlet y = 2;")).suggestion_text(),
+            None
+        );
+        assert_eq!(finding(Some("   ")).suggestion_text(), None);
+        assert_eq!(finding(None).suggestion_text(), None);
     }
 
     #[test]

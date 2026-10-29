@@ -177,6 +177,14 @@ What matters, in order:
 Ignore pure style, naming, formatting, and speculation you cannot ground in the diff.
 Report only findings that the author should act on.
 
+Write findings the way a reviewer talks to the author: plain sentences, no headings,
+bullets, bold, em dashes, or filler. The title is one line naming the defect. The detail
+is one or two sentences: what is wrong, then how to fix it.
+
+When the entire fix is a replacement of the single line at `line`, put that exact
+replacement line in `suggestion`, with no code fence and no prose. For anything that
+spans lines or needs a judgement call, use `null`.
+
 PR: {repo}#{number} — {title}
 URL: {url}
 Author: {author}
@@ -203,6 +211,7 @@ Return ONLY a JSON object with this exact shape:
       "severity": "high|medium|low",
       "title": "one-line defect statement",
       "detail": "why it is wrong and how to fix it",
+      "suggestion": "exact replacement for the line, or null",
       "intent_related": true
     }}
   ]
@@ -253,6 +262,9 @@ and `git -C /tmp/diffy-review-<unique> checkout diffy-review`.
 Use `git -C <dir> ...` (never `cd`), absolute paths with the file tools, and clean up with
 `rm -rf /tmp/diffy-review-<unique>`. Do not run tests, builds, or install scripts. Judge only
 from evidence you can see. Do not invent new findings.
+
+Write the summary and intent for the author in plain sentences, without headings, bullets,
+bold, em dashes, or filler. Keep the summary to two sentences and do not repeat every finding.
 
 PR: {repo}#{number} — {title}
 URL: {url}
@@ -445,6 +457,7 @@ mod tests {
             title: title.to_string(),
             detail: detail.to_string(),
             intent_related: true,
+            ..Finding::default()
         }
     }
 

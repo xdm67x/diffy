@@ -1,4 +1,4 @@
-use crate::models::PullRequest;
+use crate::models::{PullRequest, ReviewReport};
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use std::env;
 use std::io::Write;
@@ -85,7 +85,12 @@ impl ReviewAction {
 
 /// Posts a review on the PR through `gh pr review`. The body goes through stdin
 /// so a long report does not hit argument length limits.
-pub fn submit_review(pr: &PullRequest, action: ReviewAction, body: &str) -> Result<()> {
+pub fn submit_review(
+    pr: &PullRequest,
+    action: ReviewAction,
+    body: &str,
+    report: &ReviewReport,
+) -> Result<()> {
     let mut child = crate::exec::command("gh")
         .args(["pr", "review", &pr.url, action.flag(), "--body-file", "-"])
         .stdin(Stdio::piped())
@@ -109,7 +114,41 @@ pub fn submit_review(pr: &PullRequest, action: ReviewAction, body: &str) -> Resu
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
+    post_suggestions(pr, report);
     Ok(())
+}
+
+/// Posts each one-line fix as a GitHub suggestion on its line. Best effort:
+/// GitHub rejects a line that is not part of the diff, and the review body
+/// already explains the fix in prose.
+fn post_suggestions(pr: &PullRequest, report: &ReviewReport) {
+    for finding in report.confirmed.iter().chain(report.accepted.iter()) {
+        let (Some(suggestion), Some(line)) = (finding.suggestion_text(), finding.line) else {
+            continue;
+        };
+        let path = finding.file.trim();
+        if path.is_empty() {
+            continue;
+        }
+        let endpoint = format!("repos/{}/pulls/{}/comments", pr.repo_name(), pr.number);
+        let body = format!("```suggestion\n{suggestion}\n```");
+        let _ = crate::exec::command("gh")
+            .args([
+                "api",
+                "--method",
+                "POST",
+                &endpoint,
+                "-f",
+                &format!("body={body}"),
+                "-f",
+                &format!("path={path}"),
+                "-F",
+                &format!("line={line}"),
+                "-f",
+                "side=RIGHT",
+            ])
+            .output();
+    }
 }
 
 pub fn fetch_diff(pr: &PullRequest) -> Result<String> {

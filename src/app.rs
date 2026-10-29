@@ -303,6 +303,7 @@ impl Diffy {
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let this = this.clone();
             let pr = pr.clone();
+            let report = report.clone();
             let editor = editor.clone();
             dialog
                 .title(confirm_title(action))
@@ -319,7 +320,7 @@ impl Diffy {
                                         .text_xs()
                                         .text_color(cx.theme().muted_foreground)
                                         .child(format!(
-                                            "Diffy posts this to {target} on GitHub as you. Edit the body first if you want."
+                                            "Diffy posts this to {target} on GitHub as you, and adds one-line fixes as inline suggestions. Edit the body first if you want."
                                         )),
                                 )
                                 .child(
@@ -337,8 +338,10 @@ impl Diffy {
                 .on_ok(move |_, _, cx| {
                     let this = this.clone();
                     let pr = pr.clone();
+                    let report = report.clone();
                     let body = editor.read(cx).value().to_string();
-                    let _ = this.update(cx, |this, cx| this.post(pr, action, body, cx));
+                    let _ =
+                        this.update(cx, |this, cx| this.post(pr, action, body, report, cx));
                     true
                 })
         });
@@ -349,6 +352,7 @@ impl Diffy {
         pr: PullRequest,
         action: ReviewAction,
         body: String,
+        report: ReviewReport,
         cx: &mut Context<Self>,
     ) {
         if self.posting.is_some() {
@@ -359,7 +363,7 @@ impl Diffy {
         let target = format!("{}#{}", pr.repo_name(), pr.number);
         cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { api::submit_review(&pr, action, &body) })
+                .background_spawn(async move { api::submit_review(&pr, action, &body, &report) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.posting = None;
