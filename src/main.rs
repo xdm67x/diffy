@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod claude;
+mod exec;
 mod models;
 mod review;
 mod state;

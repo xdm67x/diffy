@@ -15,7 +15,7 @@ pub fn run(system_prompt: &str, prompt: &str, progress: &(dyn Fn(&str) + Sync)) 
 }
 
 fn base_command(system_prompt: &str) -> Command {
-    let mut command = Command::new("claude");
+    let mut command = crate::exec::command("claude");
     command
         .arg("--print")
         .args(["--model", "opus"])

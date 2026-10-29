@@ -2,7 +2,7 @@ use crate::models::PullRequest;
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use std::env;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 const PR_FIELDS: &str = "number,title,url,body,repository,author,isDraft,updatedAt,commentsCount";
 
@@ -16,7 +16,7 @@ pub fn get_review_prs() -> Result<Vec<PullRequest>> {
 
     let mut prs = Vec::new();
     for target in targets {
-        let output = Command::new("gh")
+        let output = crate::exec::command("gh")
             .args([
                 "search",
                 "prs",
@@ -86,7 +86,7 @@ impl ReviewAction {
 /// Posts a review on the PR through `gh pr review`. The body goes through stdin
 /// so a long report does not hit argument length limits.
 pub fn submit_review(pr: &PullRequest, action: ReviewAction, body: &str) -> Result<()> {
-    let mut child = Command::new("gh")
+    let mut child = crate::exec::command("gh")
         .args(["pr", "review", &pr.url, action.flag(), "--body-file", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -113,7 +113,7 @@ pub fn submit_review(pr: &PullRequest, action: ReviewAction, body: &str) -> Resu
 }
 
 pub fn fetch_diff(pr: &PullRequest) -> Result<String> {
-    let output = Command::new("gh")
+    let output = crate::exec::command("gh")
         .args(["pr", "diff", &pr.url])
         .output()
         .wrap_err("failed to run `gh pr diff`")?;
