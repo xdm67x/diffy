@@ -9,7 +9,7 @@ use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt,
     button::{Button, ButtonVariant, ButtonVariants},
     h_flex,
-    input::{Escape as InputEscape, Input, InputEvent, InputState},
+    input::{Escape as InputEscape, Input, InputEvent, InputState, Textarea, TextareaState},
     link::Link,
     list::ListItem,
     scroll::ScrollableElement,
@@ -30,15 +30,13 @@ const CONTEXT: &str = "Diffy";
 /// context only keeps escape and the modifier shortcut for the sidebar.
 const FILTER_CONTEXT: &str = "DiffyFilter";
 
-actions!(diffy, [ToggleSidebar, RefreshPrs, FocusFilter, LeaveFilter]);
+actions!(diffy, [RefreshPrs, FocusFilter, LeaveFilter]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-b", ToggleSidebar, Some(CONTEXT)),
         KeyBinding::new("cmd-f", FocusFilter, Some(CONTEXT)),
         KeyBinding::new("cmd-r", RefreshPrs, Some(CONTEXT)),
         KeyBinding::new("escape", LeaveFilter, Some(FILTER_CONTEXT)),
-        KeyBinding::new("cmd-b", ToggleSidebar, Some(FILTER_CONTEXT)),
         KeyBinding::new("cmd-r", RefreshPrs, Some(FILTER_CONTEXT)),
     ]);
 }
@@ -59,7 +57,6 @@ pub struct Diffy {
     state: State,
     focus_handle: FocusHandle,
     filter: Entity<InputState>,
-    sidebar_visible: bool,
     list_scroll: ScrollHandle,
     detail_scroll: ScrollHandle,
     loading: bool,
@@ -124,7 +121,6 @@ impl Diffy {
             state: State::new(Vec::new()),
             focus_handle: cx.focus_handle(),
             filter,
-            sidebar_visible: true,
             list_scroll: ScrollHandle::new(),
             detail_scroll: ScrollHandle::new(),
             loading: false,
@@ -278,8 +274,9 @@ impl Diffy {
         });
     }
 
-    /// Opens the confirmation for posting the shown review. Nothing reaches
-    /// GitHub before the dialog's action button is pressed.
+    /// Opens the confirmation for posting the shown review. The body is
+    /// editable there, and nothing reaches GitHub before the dialog's action
+    /// button is pressed.
     fn confirm_post(&mut self, action: ReviewAction, window: &mut Window, cx: &mut Context<Self>) {
         if self.posting.is_some() {
             return;
@@ -296,16 +293,43 @@ impl Diffy {
         };
         let body = report.to_markdown();
         let target = format!("{}#{}", pr.repo_name(), pr.number);
+        let editor = cx.new(|cx| {
+            let mut state = TextareaState::new(window, cx);
+            state.set_value(body, window, cx);
+            state.set_auto_grow(8, 24, cx);
+            state
+        });
         let this = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let this = this.clone();
             let pr = pr.clone();
-            let body = body.clone();
+            let editor = editor.clone();
             dialog
                 .title(confirm_title(action))
-                .description(format!(
-                    "Diffy posts this review to {target} on GitHub as you. The body is the report shown in the window."
-                ))
+                .content({
+                    let editor = editor.clone();
+                    let target = target.clone();
+                    move |content, _, cx| {
+                        content.child(
+                            v_flex()
+                                .gap_2()
+                                .p_4()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "Diffy posts this to {target} on GitHub as you. Edit the body first if you want."
+                                        )),
+                                )
+                                .child(
+                                    Textarea::new(&editor)
+                                        .aria_label("Review body")
+                                        .min_h(px(240.)),
+                                ),
+                        )
+                    }
+                })
                 .confirm()
                 .ok_text(action_label(action))
                 .ok_variant(action_variant(action))
@@ -313,7 +337,7 @@ impl Diffy {
                 .on_ok(move |_, _, cx| {
                     let this = this.clone();
                     let pr = pr.clone();
-                    let body = body.clone();
+                    let body = editor.read(cx).value().to_string();
                     let _ = this.update(cx, |this, cx| this.post(pr, action, body, cx));
                     true
                 })
@@ -354,22 +378,11 @@ impl Diffy {
         .detach();
     }
 
-    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sidebar_visible && self.filter_is_focused(window, cx) {
-            window.focus(&self.focus_handle, cx);
-        }
-        self.sidebar_visible = !self.sidebar_visible;
-        cx.notify();
-    }
-
     fn filter_is_focused(&self, window: &Window, cx: &App) -> bool {
         self.filter.focus_handle(cx).is_focused(window)
     }
 
     fn focus_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.sidebar_visible {
-            self.sidebar_visible = true;
-        }
         let handle = self.filter.focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
@@ -380,15 +393,6 @@ impl Diffy {
             window.focus(&self.focus_handle, cx);
             cx.notify();
         }
-    }
-
-    fn on_toggle_sidebar(
-        &mut self,
-        _: &ToggleSidebar,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_sidebar(window, cx);
     }
 
     fn on_refresh(&mut self, _: &RefreshPrs, _: &mut Window, cx: &mut Context<Self>) {
@@ -413,26 +417,6 @@ impl Diffy {
         }
     }
 
-    fn toggle_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let hint = if self.sidebar_visible {
-            "Hide review requests (⌘B)"
-        } else {
-            "Show review requests (⌘B)"
-        };
-        let icon = if self.sidebar_visible {
-            IconName::PanelLeftClose
-        } else {
-            IconName::PanelLeftOpen
-        };
-        Button::new("toggle-sidebar")
-            .ghost()
-            .small()
-            .icon(icon)
-            .tooltip(hint)
-            .accessibility_label(hint)
-            .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
-    }
-
     fn main_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .flex_1()
@@ -444,21 +428,14 @@ impl Diffy {
             .child(self.status_bar(cx))
     }
 
-    /// The strip beside the traffic lights. It keeps the sidebar toggle in one
-    /// place whether the list is open or hidden, and gives the window a drag
-    /// surface above the content.
-    fn main_top_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The strip above the content, a drag surface for the window.
+    fn main_top_bar(&mut self, _: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .h_9()
             .flex_shrink_0()
             .px_4()
             .items_center()
             .window_control_area(WindowControlArea::Drag)
-            .when(!self.sidebar_visible, |this| {
-                // Clear the traffic lights before the toggle when the list is
-                // hidden and the main pane reaches the window's left edge.
-                this.pl_20().child(self.toggle_button(cx))
-            })
     }
 
     fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -504,7 +481,6 @@ impl Diffy {
                     .pr_3()
                     .items_center()
                     .window_control_area(WindowControlArea::Drag)
-                    .child(self.toggle_button(cx))
                     .child(div().flex_1()),
             )
             .child(
@@ -1338,10 +1314,7 @@ impl Diffy {
     }
 
     fn status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let hints = format!(
-            "⌘F filter · ⌘B {} list · ⌘R refresh",
-            if self.sidebar_visible { "hide" } else { "show" }
-        );
+        let hints = "⌘F filter · ⌘R refresh";
         let position = self
             .state
             .prs
@@ -1400,7 +1373,6 @@ impl Render for Diffy {
             .text_sm()
             .track_focus(&self.focus_handle)
             .key_context(context)
-            .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_refresh))
             .on_action(cx.listener(Self::on_focus_filter))
             .on_action(cx.listener(Self::on_leave_filter))
@@ -1409,7 +1381,7 @@ impl Render for Diffy {
                 h_flex()
                     .items_stretch()
                     .size_full()
-                    .when(self.sidebar_visible, |this| this.child(self.sidebar(cx)))
+                    .child(self.sidebar(cx))
                     .child(self.main_pane(cx)),
             )
     }
@@ -1659,28 +1631,6 @@ mod tests {
             super::severity_summary(&ordered),
             "1 high · 1 medium · 1 low"
         );
-    }
-
-    #[gpui_kit::test]
-    fn the_sidebar_toggles_from_the_keyboard(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
-        cx.update(bind_keys);
-        let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one"), pr("acme/api", 2, "two")]);
-
-        cx.update_window(handle, |_, window, cx| {
-            focus_window(&view, window, cx);
-            window.render_frame(cx);
-            assert_eq!(
-                view.read(cx).state.selected_pr().map(|pr| pr.number),
-                Some(2)
-            );
-
-            window.press("cmd-b", cx);
-            assert!(!view.read(cx).sidebar_visible);
-            window.press("cmd-b", cx);
-            assert!(view.read(cx).sidebar_visible);
-        })
-        .unwrap();
     }
 
     #[gpui_kit::test]

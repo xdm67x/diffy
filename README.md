@@ -7,8 +7,7 @@ select. Several PRs can be reviewed at the same time, each run is kept in that P
 history so you can run it again after new commits and compare, and you can post a review to
 GitHub as an approval, a request for changes, or a comment.
 
-The review list lives in a sidebar that can be hidden, so the description and findings can
-use the whole window while you read. The interface is built with
+The review list lives in an always-open sidebar beside the review. The interface is built with
 [GPUI](https://gpui.rs/) and [GPUI Kit](https://gpui-kit.com/).
 
 ## Requirements
@@ -48,8 +47,7 @@ repository and PR number.
 
 Diffy opens in a dark, near-black window that sits next to an editor. The review requests
 live in a full-height sidebar on the left and the selected PR on the right. The window
-controls sit inside the sidebar, and the panel button beside them hides the list so the
-review can use the whole window; `⌘B` does the same.
+controls sit inside the sidebar, which stays open beside the review.
 
 The sidebar starts with the filter field, then a **Review requests** header with the visible
 count and a refresh button, then the list grouped by repository, newest PR first. Each row
@@ -73,7 +71,6 @@ inside the field focuses it.
 
 | Key | Action |
 | --- | --- |
-| `⌘B` | Show or hide the PR list |
 | `⌘F` | Focus the PR filter |
 | `⌘R` | Refresh the PR list from GitHub |
 | `Esc` | Leave the filter |
@@ -83,13 +80,12 @@ done with the window controls: click a PR row, use the **Run review** button, th
 history arrows, and the **Comment** / **Request changes** / **Approve** buttons.
 
 Posting uses the buttons in the review header: **Comment**, **Request changes**, and
-**Approve**. Each one opens a confirmation dialog naming the PR, and nothing is posted
-before you confirm. They are disabled while a post is in flight and while no finished
-review is shown.
+**Approve**. Each one opens a dialog naming the PR with the review body in an editable text
+field, and nothing is posted before you confirm. They are disabled while a post is in flight
+and while no finished review is shown.
 
 With the mouse you can click a PR to select it, scroll the PR list or the review pane, use
-the refresh button in the **Review requests** header, and use the panel button beside the
-window controls to show or hide the list.
+the refresh button in the **Review requests** header.
 
 The filter only hides rows. Every fetched PR stays loaded, so clearing the filter brings
 all of your review requests back, and the selection follows a PR by its url rather than its
@@ -150,8 +146,9 @@ The **Comment**, **Request changes**, and **Approve** buttons in the review head
 finished review currently shown. Diffy posts it with
 `gh pr review --approve | --request-changes | --comment`, using that report as the review
 body: the verdict, the summary, the intent assessment, and the confirmed and judge-accepted
-findings. Dismissed findings are left out. The body goes to `gh` through stdin, so its
-length is not limited by the command line.
+findings. Dismissed findings are left out. The confirmation dialog shows that body in a
+text field, and whatever it holds when you confirm is what gets posted. The body goes to
+`gh` through stdin, so its length is not limited by the command line.
 
 Nothing is posted before you confirm the dialog, and a failure (for example GitHub refusing
 an approval on a PR you authored) shows up in the status bar. Diffy does not record which
@@ -238,5 +235,5 @@ cargo test
 
 The matching, JSON-parsing, review-log, and PR-list state logic have unit tests. `cargo
 test` also runs the headless GPUI integration tests, which render the real window and drive
-the keyboard paths for selection, the sidebar toggle, and the repository filter. The Claude
+the keyboard paths for selection and the repository filter. The Claude
 calls are not exercised in tests because they need credentials and cost money.
