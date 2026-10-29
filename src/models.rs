@@ -171,41 +171,100 @@ pub struct ReviewReport {
 }
 
 impl ReviewReport {
-    /// Markdown body posted to GitHub when the review is submitted.
+    /// Markdown body posted to GitHub when the review is submitted. Written for a
+    /// human skimming the PR: verdict first, then findings worst-first.
     pub fn to_markdown(&self) -> String {
-        let verdict = match self.verdict {
-            Verdict::Merge => "approve",
-            Verdict::RequestChanges => "request changes",
+        let (emoji, verdict) = match self.verdict {
+            Verdict::Merge => ("✅", "Approve"),
+            Verdict::RequestChanges => ("❌", "Request changes"),
         };
-        let mut out = format!("## Diffy review: {verdict}\n\n");
+        let findings: Vec<(&Finding, &str)> = self
+            .confirmed
+            .iter()
+            .map(|finding| (finding, "reported by both reviewers"))
+            .chain(
+                self.accepted
+                    .iter()
+                    .map(|finding| (finding, "accepted by the judge")),
+            )
+            .collect();
 
+        let mut out = format!("## {emoji} Diffy review: {verdict}\n\n");
         if !self.summary.trim().is_empty() {
             out.push_str(self.summary.trim());
             out.push_str("\n\n");
         }
         if !self.intent.trim().is_empty() {
-            out.push_str(&format!("**Intent:** {}\n\n", self.intent.trim()));
+            out.push_str(&format!("> **Intent:** {}\n\n", self.intent.trim()));
         }
 
-        let findings: Vec<&Finding> = self.confirmed.iter().chain(&self.accepted).collect();
         if findings.is_empty() {
             out.push_str("No blocking findings.\n");
         } else {
-            out.push_str(&format!("### Findings ({})\n\n", findings.len()));
-            for finding in findings {
-                out.push_str(&format!(
-                    "- **{}** `{}` — {}\n",
-                    finding.severity().to_uppercase(),
-                    finding.location(),
-                    finding.title
-                ));
-                for line in finding.detail.lines() {
-                    out.push_str(&format!("  {line}\n"));
+            out.push_str(&format!(
+                "**{} {} to address**\n",
+                findings.len(),
+                if findings.len() == 1 {
+                    "finding"
+                } else {
+                    "findings"
+                }
+            ));
+            for (label, group) in severity_groups(&findings) {
+                out.push_str(&format!("\n#### {label}\n\n"));
+                for (finding, source) in group {
+                    out.push_str(&format!(
+                        "1. **{}** — `{}`\n",
+                        finding.title.trim(),
+                        finding.location()
+                    ));
+                    for line in finding.detail.trim().lines() {
+                        out.push_str(&format!("   {line}\n"));
+                    }
+                    out.push_str(&format!("   <sub>{source}</sub>\n"));
                 }
             }
         }
+
+        let dismissed = self.dismissed.len();
+        if dismissed > 0 {
+            out.push_str(&format!(
+                "\n---\n\n<sub>{dismissed} other finding{} filtered out as not relevant.</sub>\n",
+                if dismissed == 1 { "" } else { "s" }
+            ));
+        }
         out
     }
+}
+
+/// Findings grouped high → medium → low → anything else, worst first.
+fn severity_groups<'a>(
+    findings: &[(&'a Finding, &'a str)],
+) -> Vec<(&'static str, Vec<(&'a Finding, &'a str)>)> {
+    let mut groups = Vec::new();
+    for (severity, label) in [
+        ("high", "🔴 High severity"),
+        ("medium", "🟠 Medium severity"),
+        ("low", "🟡 Low severity"),
+        ("", "⚪ Other"),
+    ] {
+        let group: Vec<_> = findings
+            .iter()
+            .copied()
+            .filter(|(finding, _)| {
+                let actual = finding.severity();
+                if severity.is_empty() {
+                    !matches!(actual.as_str(), "high" | "medium" | "low")
+                } else {
+                    actual == severity
+                }
+            })
+            .collect();
+        if !group.is_empty() {
+            groups.push((label, group));
+        }
+    }
+    groups
 }
 
 fn de_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -309,10 +368,57 @@ mod tests {
             dismissed: vec![(Finding::default(), "speculation".to_string())],
         };
         let body = report.to_markdown();
-        assert!(body.starts_with("## Diffy review: request changes"));
-        assert!(body.contains("`src/db.rs:7`"));
-        assert!(body.contains("SQL injection"));
+        assert!(body.starts_with("## ❌ Diffy review: Request changes"));
+        assert!(body.contains("> **Intent:** partially implemented"));
+        assert!(body.contains("**1 finding to address**"));
+        assert!(body.contains("#### 🔴 High severity"));
+        assert!(body.contains("1. **SQL injection** — `src/db.rs:7`"));
+        assert!(body.contains("   user input is concatenated"));
+        assert!(body.contains("<sub>reported by both reviewers</sub>"));
+        assert!(body.contains("<sub>1 other finding filtered out as not relevant.</sub>"));
         assert!(!body.contains("speculation"));
+    }
+
+    #[test]
+    fn markdown_orders_severities_and_reads_cleanly_without_findings() {
+        let finding = |severity: &str, file: &str| Finding {
+            file: file.to_string(),
+            severity: severity.to_string(),
+            title: severity.to_string(),
+            ..Finding::default()
+        };
+        let report = ReviewReport {
+            verdict: Verdict::Merge,
+            summary: String::new(),
+            intent: String::new(),
+            confirmed: vec![finding("low", "c.rs"), finding("weird", "d.rs")],
+            accepted: vec![finding("high", "a.rs")],
+            dismissed: Vec::new(),
+        };
+        let body = report.to_markdown();
+        let order: Vec<usize> = [
+            "#### 🔴 High severity",
+            "#### 🟡 Low severity",
+            "#### ⚪ Other",
+        ]
+        .iter()
+        .map(|heading| body.find(heading).expect("missing severity heading"))
+        .collect();
+        assert!(order.is_sorted());
+        assert!(body.contains("`a.rs`") && body.contains("`c.rs`") && body.contains("`d.rs`"));
+
+        let clean = ReviewReport {
+            verdict: Verdict::Merge,
+            summary: "ship it".to_string(),
+            intent: String::new(),
+            confirmed: Vec::new(),
+            accepted: Vec::new(),
+            dismissed: Vec::new(),
+        }
+        .to_markdown();
+        assert!(clean.starts_with("## ✅ Diffy review: Approve"));
+        assert!(clean.contains("No blocking findings."));
+        assert!(!clean.contains("filtered out"));
     }
 
     #[test]
