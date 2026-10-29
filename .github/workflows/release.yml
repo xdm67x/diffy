@@ -94,6 +94,47 @@ jobs:
           asset="diffy-v$version-aarch64-apple-darwin.tar.gz"
           tar -czf "dist/$asset" -C target/aarch64-apple-darwin/release diffy
           (cd dist && shasum -a 256 "$asset" >"$asset.sha256")
+      - name: Build the macOS app and DMG
+        run: |
+          set -euo pipefail
+
+          # Kept outside dist so the release uploads only the artifacts.
+          mkdir -p dist
+          app="$RUNNER_TEMP/Diffy.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/aarch64-apple-darwin/release/diffy "$app/Contents/MacOS/diffy"
+
+          cat >"$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Diffy</string>
+            <key>CFBundleDisplayName</key><string>Diffy</string>
+            <key>CFBundleIdentifier</key><string>com.xdm67x.diffy</string>
+            <key>CFBundleExecutable</key><string>diffy</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$VERSION</string>
+            <key>CFBundleVersion</key><string>$VERSION</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+
+          # Ad-hoc signing keeps Gatekeeper quiet about a modified arm64 bundle.
+          codesign --force --sign - "$app"
+
+          # The DMG holds Diffy.app itself plus the usual drag-to-install link.
+          stage="$RUNNER_TEMP/dmg"
+          mkdir -p "$stage"
+          cp -R "$app" "$stage/"
+          ln -s /Applications "$stage/Applications"
+
+          asset="diffy-v$VERSION-aarch64-apple-darwin.dmg"
+          hdiutil create -volname "Diffy" -srcfolder "$stage" -ov -format UDZO "dist/$asset"
+          (cd dist && shasum -a 256 "$asset" >"$asset.sha256")
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

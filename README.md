@@ -18,7 +18,17 @@ The review list lives in an always-open sidebar beside the review. The interface
   `claude auth status`
 - A git repository is **not** required; Diffy only reads PR data through `gh`.
 
-## Run
+## Install
+
+Download `diffy-v<version>-aarch64-apple-darwin.dmg` from the
+[releases](https://github.com/xdm67x/diffy/releases), open it, and drag **Diffy** into
+Applications. Each release also ships the bare binary as a `.tar.gz`.
+
+The app is ad-hoc signed, not notarized, so the first launch is blocked by Gatekeeper:
+right-click **Diffy** and choose **Open**, or run
+`xattr -d com.apple.quarantine /Applications/Diffy.app`.
+
+## Run from source
 
 ```sh
 cargo run --release
