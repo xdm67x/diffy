@@ -47,20 +47,29 @@ repository and PR number.
 ## The window
 
 The window puts the review requests in a sidebar on the left and the selected PR on the
-right. The sidebar is grouped by repository, newest PR first, and each row shows the state
-of that PR's latest review. Hide the sidebar with the toolbar button or `⌘B` when you want
-the description and findings to fill the window; the same shortcut brings it back.
+right. The sidebar is grouped by repository, newest PR first. Each row wraps long titles to
+two lines and shows the author, how long ago the PR changed, the number, and the state of
+that PR's latest review. A PR that changed after its newest review is marked **out of date**,
+so you know to run the review again before posting it. Hide the sidebar with the toolbar
+button or `⌘B` when you want the description and findings to fill the window; the same
+shortcut brings it back.
 
-The review pane has a fixed header with the PR title, author, draft state, a link to GitHub,
-the review actions, and a scrolling body with the description and the review report. The
-status bar at the bottom shows the shortcut summary and the last error or success message.
+The review pane has a fixed header with the PR title, author, age, comment count, draft
+state, a link to GitHub, and the review actions. The body leads with the review, because
+that is what you opened the PR for: the verdict, the intent, the summary, the findings
+worst severity first, and the findings the judge filtered out. The PR description follows
+below as context. The status bar at the bottom shows your place in the list, the shortcut
+summary, and the last error or success message.
+
+The filter matches the repository, the PR title, the author, and the number (`#482`), so a
+queue can be narrowed without remembering which repository a PR belongs to.
 
 ## Keys
 
 | Key | Action |
 | --- | --- |
 | `⌘B` | Show or hide the PR list |
-| `⌘F` | Focus the repository filter |
+| `⌘F` | Focus the PR filter |
 | `⌘R` | Refresh the PR list from GitHub |
 | `Esc` | Leave the filter |
 
@@ -76,9 +85,9 @@ review is shown.
 With the mouse you can click a PR to select it, scroll the PR list or the review pane, and
 use the toolbar buttons for refresh and for showing or hiding the sidebar.
 
-The repository filter only hides rows. Every fetched PR stays loaded, so clearing the
-filter brings all of your review requests back, and the selection follows a PR by its url
-rather than its position. Failures (a failed refresh, review, save, or post) appear in the
+The filter only hides rows. Every fetched PR stays loaded, so clearing the filter brings
+all of your review requests back, and the selection follows a PR by its url rather than its
+position. Failures (a failed refresh, review, save, or post) appear in the
 status bar and stay there until the next action.
 
 Reviews run per PR and concurrently: run one PR, select another, run it, and both run as
@@ -87,9 +96,11 @@ tracks its own PR's stage. A PR is never reviewed twice at the same time; its **
 button is disabled while it is running. A finished review of the PR you are reading resets
 the pane to the result; a background PR finishing does not disturb what you are looking at.
 
-Every run is a new attempt appended to that PR's history. The review section shows
-`Review 2 of 3` and the arrows step through them, and the list row always reflects the
-newest attempt, including a failed one.
+Every run is a new attempt appended to that PR's history. The review section shows when the
+shown attempt finished and `Review 2 of 3` with arrows to step through them, and the list
+row always reflects the newest attempt, including a failed one. If the PR changed after the
+shown review (`gh`'s `updatedAt` moved past the review's timestamp), the review says so and
+**Run review again** is the primary action.
 
 ## How a review works
 
@@ -122,9 +133,10 @@ stage, the elapsed time, and the latest command (`reviewer 1 · gh pr diff …`)
    - `request_changes` — there is a confirmed or accepted blocking issue, or the diff
      does not do what the description promises.
 
-The result pane shows the verdict, the judge's intent assessment, the combined summary,
-findings confirmed by both reviewers, single findings the judge accepted, and findings it
-dismissed with a reason.
+The result pane shows the verdict, when it was reviewed, the judge's intent assessment, the
+combined summary, and every finding it stands behind ordered worst severity first. Each card
+says whether both reviewers reported it or the judge accepted it. Findings the judge
+dismissed are listed after those with the reason.
 
 ## Posting a review to GitHub
 
@@ -157,8 +169,9 @@ jq -s 'group_by(.url) | map(last) | sort_by(-.reviewed_at) | .[] | {url, verdict
   ~/.diffy/reviews/reviews.jsonl
 ```
 
-Reviews are keyed by PR url only, so a PR that receives new commits keeps showing its
-previous reviews until you run it again. Set `DIFFY_HOME` to keep these files somewhere else.
+Reviews are keyed by PR url only, so a PR that changes keeps showing its previous reviews,
+marked out of date, until you run it again. The saved `reviewed_at` is what Diffy compares
+with the PR's `updatedAt`. Set `DIFFY_HOME` to keep these files somewhere else.
 
 Both files are plain `serde_json`, so nothing else is needed to read them.
 

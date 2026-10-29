@@ -5,6 +5,7 @@ mod models;
 mod review;
 mod state;
 mod store;
+mod time;
 
 use app::{Diffy, bind_keys};
 use color_eyre::Result;

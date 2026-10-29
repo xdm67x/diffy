@@ -4,7 +4,7 @@ use std::env;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-const PR_FIELDS: &str = "number,title,url,body,repository,author,isDraft,updatedAt";
+const PR_FIELDS: &str = "number,title,url,body,repository,author,isDraft,updatedAt,commentsCount";
 
 /// Open PRs where the user and the configured teams are requested for review.
 /// Teams come from `~/.diffy/settings.json` (`{"teams": ["acme/backend"]}`),

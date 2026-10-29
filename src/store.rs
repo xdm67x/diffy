@@ -48,34 +48,38 @@ struct StoredReview {
 }
 
 // shortcut: reviews are keyed by PR url and never pruned, so a PR that gets new
-// commits keeps its old reviews; compare reviewed_at with updated_at if that matters.
-pub fn load_reviews() -> Result<HashMap<String, Vec<ReviewReport>>> {
+// commits keeps its old reviews; the window compares reviewed_at with updated_at.
+pub fn load_reviews() -> Result<HashMap<String, Vec<(u64, ReviewReport)>>> {
     load_reviews_in(&base_dir()?)
 }
 
-pub fn save_review(url: &str, report: &ReviewReport) -> Result<()> {
+/// Appends the review and returns the epoch second it was recorded at.
+pub fn save_review(url: &str, report: &ReviewReport) -> Result<u64> {
     save_review_in(&base_dir()?, url, report)
 }
 
-fn load_reviews_in(base: &Path) -> Result<HashMap<String, Vec<ReviewReport>>> {
+fn load_reviews_in(base: &Path) -> Result<HashMap<String, Vec<(u64, ReviewReport)>>> {
     let path = base.join(REVIEWS_FILE);
     if !path.exists() {
         return Ok(HashMap::new());
     }
     let raw = fs::read_to_string(&path)
         .wrap_err_with(|| format!("could not read reviews at {}", path.display()))?;
-    let mut reviews: HashMap<String, Vec<ReviewReport>> = HashMap::new();
+    let mut reviews: HashMap<String, Vec<(u64, ReviewReport)>> = HashMap::new();
     // A single corrupt line must not throw away the rest of the history.
     for stored in raw
         .lines()
         .filter_map(|line| serde_json::from_str::<StoredReview>(line).ok())
     {
-        reviews.entry(stored.url).or_default().push(stored.report);
+        reviews
+            .entry(stored.url)
+            .or_default()
+            .push((stored.reviewed_at, stored.report));
     }
     Ok(reviews)
 }
 
-fn save_review_in(base: &Path, url: &str, report: &ReviewReport) -> Result<()> {
+fn save_review_in(base: &Path, url: &str, report: &ReviewReport) -> Result<u64> {
     let path = base.join(REVIEWS_FILE);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -97,7 +101,8 @@ fn save_review_in(base: &Path, url: &str, report: &ReviewReport) -> Result<()> {
         .open(&path)
         .wrap_err_with(|| format!("could not open reviews at {}", path.display()))?
         .write_all(line.as_bytes())
-        .wrap_err_with(|| format!("could not append to reviews at {}", path.display()))
+        .wrap_err_with(|| format!("could not append to reviews at {}", path.display()))?;
+    Ok(reviewed_at)
 }
 
 #[cfg(test)]
@@ -140,11 +145,12 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         let history = &loaded["https://github.com/a/a/pull/1"];
         assert_eq!(history.len(), 2);
-        assert_eq!(history[0].summary, "first");
-        assert_eq!(history[1].summary, "second");
-        assert_eq!(history[1].verdict, Verdict::RequestChanges);
-        assert_eq!(history[1].confirmed.len(), 1);
-        assert_eq!(history[1].dismissed[0].1, "speculation");
+        assert_eq!(history[0].1.summary, "first");
+        assert_eq!(history[1].1.summary, "second");
+        assert_eq!(history[1].1.verdict, Verdict::RequestChanges);
+        assert_eq!(history[1].1.confirmed.len(), 1);
+        assert_eq!(history[1].1.dismissed[0].1, "speculation");
+        assert!(history[1].0 >= history[0].0, "timestamps are kept in order");
         fs::remove_dir_all(&base).unwrap();
     }
 

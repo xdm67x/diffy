@@ -1,11 +1,17 @@
 use crate::models::{PrGroup, PullRequest, ReviewReport, group_by_repo};
 use crate::review::{ReviewEvent, Stage};
+use crate::time;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
 pub enum ReviewStatus {
     Running(Stage),
-    Done(ReviewReport),
+    Done {
+        report: ReviewReport,
+        /// Epoch second the review finished, kept so the window can tell a
+        /// review that predates the latest push.
+        reviewed_at: u64,
+    },
     Failed(String),
 }
 
@@ -47,22 +53,28 @@ impl State {
         self.rebuild_rows();
     }
 
-    /// Rebuilds the visible rows from the full PR data, applying the repo filter.
-    /// Filtering only hides rows, so clearing it brings every PR back.
+    /// Rebuilds the visible rows from the full PR data, applying the filter to
+    /// the repository, title, author, and number. Filtering only hides rows, so
+    /// clearing it brings every PR back.
     fn rebuild_rows(&mut self) {
         self.prs.clear();
         self.rows.clear();
 
         let needle = self.filter.trim().to_lowercase();
         for group in &self.groups {
-            if !needle.is_empty() && !group.repo.to_lowercase().contains(&needle) {
+            let visible: Vec<&PullRequest> = group
+                .prs
+                .iter()
+                .filter(|pr| needle.is_empty() || matches(pr, &needle))
+                .collect();
+            if visible.is_empty() {
                 continue;
             }
             self.rows.push(Row::Header {
                 repo: group.repo.clone(),
-                count: group.prs.len(),
+                count: visible.len(),
             });
-            for pr in &group.prs {
+            for pr in visible {
                 self.rows.push(Row::Pr(self.prs.len()));
                 self.prs.push(pr.clone());
             }
@@ -180,7 +192,13 @@ impl State {
             }
             ReviewEvent::Done { url, report } => {
                 self.active.remove(&url);
-                self.settle_review(url.clone(), ReviewStatus::Done(report));
+                self.settle_review(
+                    url.clone(),
+                    ReviewStatus::Done {
+                        report,
+                        reviewed_at: time::now().max(0) as u64,
+                    },
+                );
                 if self.selected.as_deref() == Some(url.as_str()) {
                     self.review_offset = 0;
                 }
@@ -206,6 +224,17 @@ impl State {
     }
 }
 
+/// True when the filter text belongs to this PR. `needle` is already lowercase.
+fn matches(pr: &PullRequest, needle: &str) -> bool {
+    pr.repo_name().to_lowercase().contains(needle)
+        || pr.title.to_lowercase().contains(needle)
+        || pr.author.login.to_lowercase().contains(needle)
+        || pr
+            .number
+            .to_string()
+            .contains(needle.trim_start_matches('#'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +252,7 @@ mod tests {
             author: Author::default(),
             is_draft: false,
             updated_at: String::new(),
+            comments_count: 0,
         }
     }
 
@@ -261,13 +291,13 @@ mod tests {
         assert_eq!(state.review_history(&pull).len(), 2);
         assert!(matches!(
             state.shown_status(&pull),
-            Some(ReviewStatus::Done(report)) if report.summary == "two"
+            Some(ReviewStatus::Done { report, .. }) if report.summary == "two"
         ));
 
         state.older_review();
         assert!(matches!(
             state.shown_status(&pull),
-            Some(ReviewStatus::Done(report)) if report.summary == "one"
+            Some(ReviewStatus::Done { report, .. }) if report.summary == "one"
         ));
 
         state.older_review();
@@ -361,6 +391,31 @@ mod tests {
         state.clear_filter();
         assert_eq!(state.prs.len(), 2);
         assert_eq!(state.rows.len(), 4);
+    }
+
+    #[test]
+    fn the_filter_matches_title_author_and_number() {
+        let mut state = State::new(vec![pr(1, "acme/api"), pr(2, "acme/web")]);
+        state.groups[0].prs[0].title = "Fix login redirect".to_string();
+        state.groups[0].prs[0].author.login = "ada".to_string();
+        state.set_prs(
+            state
+                .groups
+                .iter()
+                .flat_map(|group| group.prs.clone())
+                .collect(),
+        );
+
+        state.set_filter("login".to_string());
+        assert_eq!(state.prs.len(), 1);
+        assert_eq!(state.prs[0].number, 1);
+
+        state.set_filter("ada".to_string());
+        assert_eq!(state.prs.len(), 1);
+
+        state.set_filter("#2".to_string());
+        assert_eq!(state.prs.len(), 1);
+        assert_eq!(state.prs[0].number, 2);
     }
 
     #[test]

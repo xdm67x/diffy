@@ -15,6 +15,8 @@ pub struct PullRequest {
     pub is_draft: bool,
     #[serde(default, rename = "updatedAt")]
     pub updated_at: String,
+    #[serde(default, rename = "commentsCount")]
+    pub comments_count: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -38,6 +40,12 @@ impl PullRequest {
         }
         let path = self.url.split("github.com/").nth(1).unwrap_or("");
         path.split("/pull/").next().unwrap_or("unknown").to_string()
+    }
+
+    /// True when `gh` reports PR activity after `epoch`, such as a push or a
+    /// comment after a review.
+    pub fn updated_after(&self, epoch: u64) -> bool {
+        crate::time::parse_utc(&self.updated_at).is_some_and(|updated| updated > epoch as i64)
     }
 
     pub fn description(&self) -> &str {
@@ -115,6 +123,16 @@ impl Finding {
             "medium".to_string()
         } else {
             self.severity.to_lowercase()
+        }
+    }
+
+    /// Worst first: high, medium, low, anything else.
+    pub fn severity_rank(&self) -> u8 {
+        match self.severity().as_str() {
+            "high" => 0,
+            "medium" => 1,
+            "low" => 2,
+            _ => 3,
         }
     }
 }
@@ -312,6 +330,7 @@ mod tests {
             author: Author::default(),
             is_draft: false,
             updated_at: String::new(),
+            comments_count: 0,
         }
     }
 
@@ -419,6 +438,40 @@ mod tests {
         assert!(clean.starts_with("## ✅ Diffy review: Approve"));
         assert!(clean.contains("No blocking findings."));
         assert!(!clean.contains("filtered out"));
+    }
+
+    #[test]
+    fn update_time_marks_an_older_review_as_stale() {
+        let mut pull = pr(1, "a/a", "https://github.com/a/a/pull/1");
+        pull.updated_at = "2026-10-29T07:00:00Z".to_string();
+        assert!(
+            pull.updated_after(1_793_000_000),
+            "the PR moved after the review"
+        );
+        assert!(
+            !pull.updated_after(1_793_259_474),
+            "a review after the push is current"
+        );
+        pull.updated_at.clear();
+        assert!(
+            !pull.updated_after(0),
+            "a missing timestamp cannot be stale"
+        );
+    }
+
+    #[test]
+    fn severity_rank_orders_worst_first() {
+        let rank = |severity: &str| {
+            Finding {
+                severity: severity.to_string(),
+                ..Finding::default()
+            }
+            .severity_rank()
+        };
+        assert!(rank("high") < rank("medium"));
+        assert!(rank("medium") < rank("low"));
+        assert!(rank("low") < rank("odd"));
+        assert_eq!(rank(""), rank("medium"), "missing severity reads as medium");
     }
 
     #[test]

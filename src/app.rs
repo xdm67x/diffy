@@ -3,6 +3,7 @@ use crate::models::{Finding, PullRequest, ReviewReport, Verdict};
 use crate::review::ReviewEvent;
 use crate::state::{ReviewStatus, Row, State};
 use crate::store;
+use crate::time;
 
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt,
@@ -72,7 +73,7 @@ pub struct Diffy {
 
 impl Diffy {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter repositories"));
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter pull requests"));
         let subscription =
             cx.subscribe_in(
                 &filter,
@@ -139,7 +140,14 @@ impl Diffy {
                 .state
                 .reviews
                 .extend(saved.into_iter().map(|(url, reports)| {
-                    (url, reports.into_iter().map(ReviewStatus::Done).collect())
+                    let history = reports
+                        .into_iter()
+                        .map(|(reviewed_at, report)| ReviewStatus::Done {
+                            report,
+                            reviewed_at,
+                        })
+                        .collect();
+                    (url, history)
                 })),
             Err(error) => this.set_error(format!("Could not load saved reviews: {error:#}")),
         }
@@ -279,10 +287,17 @@ impl Diffy {
     /// Opens the confirmation for posting the shown review. Nothing reaches
     /// GitHub before the dialog's action button is pressed.
     fn confirm_post(&mut self, action: ReviewAction, window: &mut Window, cx: &mut Context<Self>) {
+        if self.posting.is_some() {
+            return;
+        }
         let Some(pr) = self.state.selected_pr().cloned() else {
+            self.set_error("Select a pull request first.");
+            cx.notify();
             return;
         };
-        let Some(ReviewStatus::Done(report)) = self.state.shown_status(&pr).cloned() else {
+        let Some(ReviewStatus::Done { report, .. }) = self.state.shown_status(&pr).cloned() else {
+            self.set_error("Finish a review before posting it.");
+            cx.notify();
             return;
         };
         let body = report.to_markdown();
@@ -507,7 +522,7 @@ impl Diffy {
                     .child(if self.state.filter.trim().is_empty() {
                         "No review requests right now."
                     } else {
-                        "No repository matches this filter."
+                        "No pull request matches this filter."
                     })
                     .when(!self.state.filter.trim().is_empty(), |this| {
                         this.child(
@@ -524,7 +539,7 @@ impl Diffy {
         }
 
         v_flex()
-            .w_72()
+            .w_80()
             .h_full()
             .flex_shrink_0()
             .border_r_1()
@@ -580,42 +595,92 @@ impl Diffy {
     fn pr_row(&self, pr: &PullRequest, cx: &mut Context<Self>) -> impl IntoElement {
         let (icon, color, status) = self.marker(&pr.url, cx);
         let selected = self.state.selected.as_deref() == Some(pr.url.as_str());
+        let stale = self.review_is_stale(pr);
+        let meta = pr_meta(pr);
         let url = pr.url.clone();
+        let mut label = format!("PR #{} {} — {}", pr.number, pr.title, status);
+        if !meta.is_empty() {
+            label.push_str(&format!("; {meta}"));
+        }
+        if stale {
+            label.push_str("; the review is out of date");
+        }
         ListItem::new(ElementId::Name(format!("pr-{}", pr.url).into()))
             .selected(selected)
-            .accessibility_label(format!("PR #{} {} — {}", pr.number, pr.title, status))
+            .accessibility_label(label)
             .on_click(cx.listener(move |this, _, _, cx| this.select_url(&url, cx)))
             .child(
                 h_flex()
                     .w_full()
                     .gap_2()
-                    .items_center()
+                    .items_start()
                     .child(
                         div()
                             .w_4()
+                            .mt_0p5()
                             .flex_shrink_0()
                             .flex()
                             .justify_center()
                             .child(Icon::new(icon).small().text_color(color)),
                     )
-                    .child(div().flex_1().min_w_0().truncate().child(pr.title.clone()))
-                    .when(pr.is_draft, |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .flex_shrink_0()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Draft"),
-                        )
-                    })
                     .child(
-                        div()
-                            .text_xs()
-                            .flex_shrink_0()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("#{}", pr.number)),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .text_sm()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .line_clamp(2)
+                                    .child(pr.title.clone()),
+                            )
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_2()
+                                    .items_center()
+                                    .text_xs()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(meta),
+                                    )
+                                    .when(stale, |this| {
+                                        this.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_color(cx.theme().warning)
+                                                .child("out of date"),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format!("#{}", pr.number)),
+                                    ),
+                            ),
                     ),
             )
+    }
+
+    /// True when the newest finished review predates the latest push, so the
+    /// verdict no longer covers everything in the PR.
+    fn review_is_stale(&self, pr: &PullRequest) -> bool {
+        let Some(ReviewStatus::Done { reviewed_at, .. }) = self
+            .state
+            .reviews
+            .get(&pr.url)
+            .and_then(|history| history.last())
+        else {
+            return false;
+        };
+        pr.updated_after(*reviewed_at)
     }
 
     fn marker(&self, url: &str, cx: &App) -> (IconName, Hsla, String) {
@@ -639,7 +704,7 @@ impl Diffy {
                     .cloned()
                     .unwrap_or_else(|| stage.label().to_string()),
             ),
-            Some(ReviewStatus::Done(report)) => match report.verdict {
+            Some(ReviewStatus::Done { report, .. }) => match report.verdict {
                 Verdict::Merge => (
                     IconName::CircleCheck,
                     cx.theme().success,
@@ -683,12 +748,12 @@ impl Diffy {
                     .child(
                         v_flex()
                             .w_full()
-                            .max_w_128()
+                            .max_w(rems(40.))
                             .mx_auto()
                             .p_6()
                             .gap_6()
-                            .child(self.description(&pr, cx))
-                            .child(self.review(&pr, cx)),
+                            .child(self.review(&pr, cx))
+                            .child(self.description(&pr, cx)),
                     ),
             )
     }
@@ -709,7 +774,7 @@ impl Diffy {
             .when(
                 !self.loading && !self.state.filter.trim().is_empty(),
                 |this| {
-                    this.child("No repository matches this filter.").child(
+                    this.child("No pull request matches this filter.").child(
                         Button::new("clear-filter-empty")
                             .label("Clear filter")
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -739,8 +804,22 @@ impl Diffy {
     ) -> impl IntoElement {
         let running = self.state.active.contains(&pr.url);
         let shown = self.state.shown_status(pr).cloned();
+        let done = matches!(shown, Some(ReviewStatus::Done { .. }));
+        let stale = self.review_is_stale(pr);
         let busy = self.posting.is_some();
         let mut header = v_flex().gap_3();
+
+        let mut meta = vec![format!("by {}", author_name(pr))];
+        if let Some(updated) = time::parse_utc(&pr.updated_at) {
+            meta.push(format!("updated {}", time::ago(updated, time::now())));
+        }
+        if pr.comments_count > 0 {
+            meta.push(format!(
+                "{} comment{}",
+                pr.comments_count,
+                plural(pr.comments_count as usize)
+            ));
+        }
 
         header = header.child(
             h_flex()
@@ -774,7 +853,7 @@ impl Diffy {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_xl()
+                        .text_2xl()
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(pr.title.clone()),
                 )
@@ -787,11 +866,7 @@ impl Diffy {
             div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(format!(
-                    "by {} · updated {}",
-                    author_name(pr),
-                    pr.updated_at
-                )),
+                .child(meta.join(" · ")),
         );
 
         header = header.child(
@@ -808,46 +883,47 @@ impl Diffy {
                             "Run review"
                         })
                         .icon(IconName::Play)
-                        .when(!running, |this| this.primary())
+                        // Running is the main action until a review exists; once a
+                        // review is ready, posting it is what the reader came for.
+                        .when(!running && (!done || stale), |this| this.primary())
+                        .when(!running && done && !stale, |this| this.outline())
+                        .tooltip("Run the reviewer council")
                         .loading(running)
                         .disabled(running)
                         .on_click(cx.listener(|this, _, _, cx| this.run_review(cx))),
                 )
-                .when(
-                    !running && matches!(shown, Some(ReviewStatus::Done(_))),
-                    |this| {
-                        this.child(div().flex_1())
-                            .child(
-                                Button::new("post-comment")
-                                    .label("Comment")
-                                    .outline()
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.confirm_post(ReviewAction::Comment, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("post-changes")
-                                    .label("Request changes")
-                                    .danger()
-                                    .disabled(busy)
-                                    .loading(self.posting == Some(ReviewAction::RequestChanges))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.confirm_post(ReviewAction::RequestChanges, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("post-approve")
-                                    .label("Approve")
-                                    .success()
-                                    .disabled(busy)
-                                    .loading(self.posting == Some(ReviewAction::Approve))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.confirm_post(ReviewAction::Approve, window, cx)
-                                    })),
-                            )
-                    },
-                ),
+                .when(!running && done, |this| {
+                    this.child(div().flex_1())
+                        .child(
+                            Button::new("post-comment")
+                                .label("Comment")
+                                .outline()
+                                .disabled(busy)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.confirm_post(ReviewAction::Comment, window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("post-changes")
+                                .label("Request changes")
+                                .danger()
+                                .disabled(busy)
+                                .loading(self.posting == Some(ReviewAction::RequestChanges))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.confirm_post(ReviewAction::RequestChanges, window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("post-approve")
+                                .label("Approve")
+                                .success()
+                                .disabled(busy)
+                                .loading(self.posting == Some(ReviewAction::Approve))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.confirm_post(ReviewAction::Approve, window, cx)
+                                })),
+                        )
+                }),
         );
 
         v_flex()
@@ -855,7 +931,7 @@ impl Diffy {
             .p_6()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(v_flex().w_full().max_w_128().mx_auto().child(header))
+            .child(v_flex().w_full().max_w(rems(40.)).mx_auto().child(header))
     }
 
     fn description(&mut self, pr: &PullRequest, cx: &Context<Self>) -> impl IntoElement {
@@ -880,7 +956,7 @@ impl Diffy {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Not reviewed yet. Run the review council to get a verdict."),
+                            .child("Not reviewed yet. Run the reviewer council to get a verdict."),
                     )
                     .child(
                         div()
@@ -974,8 +1050,11 @@ impl Diffy {
                         ),
                 );
             }
-            Some(ReviewStatus::Done(report)) => {
-                section = section.child(self.report(&report, pr, cx));
+            Some(ReviewStatus::Done {
+                report,
+                reviewed_at,
+            }) => {
+                section = section.child(self.report(&report, reviewed_at, pr, cx));
             }
         }
         section
@@ -984,21 +1063,36 @@ impl Diffy {
     fn report(
         &mut self,
         report: &ReviewReport,
+        reviewed_at: u64,
         pr: &PullRequest,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let history_len = self.state.review_history(pr).len();
         let offset = self.state.review_offset;
         let index = history_len.saturating_sub(1 + offset);
-        let findings = report.confirmed.len() + report.accepted.len();
+        let findings = ordered_findings(report);
+        let counts = severity_summary(&findings);
+        let stale = self.review_is_stale(pr);
+        let updated_ago =
+            time::parse_utc(&pr.updated_at).map(|updated| time::ago(updated, time::now()));
 
         v_flex()
-            .gap_4()
+            .gap_5()
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap_3()
                     .items_center()
                     .child(verdict_tag(report.verdict).child(verdict_label(report.verdict)))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "reviewed {}",
+                                time::ago(reviewed_at as i64, time::now())
+                            )),
+                    )
+                    .child(div().flex_1())
                     .when(history_len > 1, |this| {
                         this.child(
                             div()
@@ -1006,10 +1100,7 @@ impl Diffy {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(format!("Review {} of {}", index + 1, history_len)),
                         )
-                    })
-                    .child(div().flex_1())
-                    .when(history_len > 1, |this| {
-                        this.child(
+                        .child(
                             Button::new("older-review")
                                 .ghost()
                                 .small()
@@ -1037,6 +1128,23 @@ impl Diffy {
                         )
                     }),
             )
+            .when(stale, |this| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .text_xs()
+                        .text_color(cx.theme().warning)
+                        .child(Icon::new(IconName::CircleAlert).small())
+                        .child(match updated_ago {
+                            Some(ago) => format!(
+                                "The PR changed {ago}, after this review, so these findings may be out of date."
+                            ),
+                            None => "The PR changed after this review, so these findings may be out of date."
+                                .to_string(),
+                        }),
+                )
+            })
             .when(!report.intent.trim().is_empty(), |this| {
                 this.child(
                     v_flex()
@@ -1053,23 +1161,36 @@ impl Diffy {
                         .child(div().child(report.summary.clone())),
                 )
             })
-            .when(!report.confirmed.is_empty(), |this| {
-                this.child(findings_section(
-                    format!("Confirmed by both reviewers ({})", report.confirmed.len()),
-                    &report.confirmed,
-                    "reported by both reviewers",
-                    cx,
-                ))
+            .when(!findings.is_empty(), |this| {
+                this.child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(section_title(
+                                    format!("Findings ({})", findings.len()),
+                                    cx,
+                                ))
+                                .child(div().flex_1())
+                                .when(!counts.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(counts),
+                                    )
+                                }),
+                        )
+                        .children(
+                            findings
+                                .iter()
+                                .map(|(finding, source)| finding_card(finding, source, cx)),
+                        ),
+                )
             })
-            .when(!report.accepted.is_empty(), |this| {
-                this.child(findings_section(
-                    format!("Accepted by the judge ({})", report.accepted.len()),
-                    &report.accepted,
-                    "accepted by the judge",
-                    cx,
-                ))
-            })
-            .when(findings == 0, |this| {
+            .when(findings.is_empty(), |this| {
                 this.child(
                     div()
                         .text_sm()
@@ -1082,7 +1203,7 @@ impl Diffy {
                     v_flex()
                         .gap_2()
                         .child(section_title(
-                            format!("Dismissed as not relevant ({})", report.dismissed.len()),
+                            format!("Filtered out ({})", report.dismissed.len()),
                             cx,
                         ))
                         .children(report.dismissed.iter().map(|(finding, reason)| {
@@ -1109,13 +1230,21 @@ impl Diffy {
             "⌘F filter · ⌘B {} list · ⌘R refresh",
             if self.sidebar_visible { "hide" } else { "show" }
         );
-        StatusBar::new()
+        let position = self
+            .state
+            .prs
+            .iter()
+            .position(|pr| Some(pr.url.as_str()) == self.state.selected.as_deref())
+            .map(|index| format!("{} of {} · ", index + 1, self.state.prs.len()));
+        let mut bar = StatusBar::new()
             .flex_shrink_0()
             .border_t_1()
             .border_color(cx.theme().border)
-            .text_xs()
-            .left(hints)
-            .right(self.notice_element(cx))
+            .text_xs();
+        if let Some(position) = position {
+            bar = bar.left(position);
+        }
+        bar.left(hints).right(self.notice_element(cx))
     }
 
     fn notice_element(&self, cx: &App) -> impl IntoElement {
@@ -1183,17 +1312,42 @@ fn section_title(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
         .child(text.into())
 }
 
-fn findings_section(
-    title: String,
-    findings: &[Finding],
-    source: &str,
-    cx: &App,
-) -> impl IntoElement {
-    v_flex().gap_2().child(section_title(title, cx)).children(
-        findings
-            .iter()
-            .map(|finding| finding_card(finding, source, cx)),
-    )
+/// Every finding the report stands behind, worst severity first. Findings both
+/// reviewers reported come before judge-accepted ones at the same severity.
+fn ordered_findings(report: &ReviewReport) -> Vec<(&Finding, &'static str)> {
+    let mut findings: Vec<(&Finding, &'static str)> = report
+        .confirmed
+        .iter()
+        .map(|finding| (finding, "reported by both reviewers"))
+        .chain(
+            report
+                .accepted
+                .iter()
+                .map(|finding| (finding, "accepted by the judge")),
+        )
+        .collect();
+    findings.sort_by_key(|(finding, source)| {
+        (
+            finding.severity_rank(),
+            *source != "reported by both reviewers",
+        )
+    });
+    findings
+}
+
+/// `2 high · 1 medium`, worst first, omitting empty severities.
+fn severity_summary(findings: &[(&Finding, &'static str)]) -> String {
+    [("high", 0), ("medium", 1), ("low", 2)]
+        .into_iter()
+        .filter_map(|(label, rank)| {
+            let count = findings
+                .iter()
+                .filter(|(finding, _)| finding.severity_rank() == rank)
+                .count();
+            (count > 0).then(|| format!("{count} {label}"))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn finding_card(finding: &Finding, source: &str, cx: &App) -> impl IntoElement {
@@ -1231,12 +1385,7 @@ fn finding_card(finding: &Finding, source: &str, cx: &App) -> impl IntoElement {
                 ),
         )
         .when(!finding.detail.trim().is_empty(), |this| {
-            this.child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(finding.detail.trim().to_string()),
-            )
+            this.child(div().text_sm().child(finding.detail.trim().to_string()))
         })
         .child(
             div()
@@ -1292,6 +1441,21 @@ fn verb(action: ReviewAction) -> &'static str {
     }
 }
 
+/// Second line of a list row: author, freshness, discussion.
+fn pr_meta(pr: &PullRequest) -> String {
+    let mut parts = Vec::new();
+    if !pr.author.login.is_empty() {
+        parts.push(pr.author.login.clone());
+    }
+    if let Some(updated) = time::parse_utc(&pr.updated_at) {
+        parts.push(time::ago(updated, time::now()));
+    }
+    if pr.is_draft {
+        parts.push("draft".to_string());
+    }
+    parts.join(" · ")
+}
+
 fn author_name(pr: &PullRequest) -> &str {
     if pr.author.login.is_empty() {
         "unknown"
@@ -1314,6 +1478,8 @@ mod tests {
         WindowBounds, WindowOptions, point, px, size,
     };
 
+    use crate::models::{Finding, ReviewReport, Verdict};
+
     fn pr(repo: &str, number: u64, title: &str) -> PullRequest {
         PullRequest {
             number,
@@ -1326,6 +1492,7 @@ mod tests {
             author: Author::default(),
             is_draft: false,
             updated_at: String::new(),
+            comments_count: 0,
         }
     }
 
@@ -1362,6 +1529,33 @@ mod tests {
         window.focus(&focus, cx);
     }
 
+    #[test]
+    fn findings_read_worst_first_and_counted_by_severity() {
+        let finding = |severity: &str| Finding {
+            severity: severity.to_string(),
+            ..Finding::default()
+        };
+        let report = ReviewReport {
+            verdict: Verdict::RequestChanges,
+            summary: String::new(),
+            intent: String::new(),
+            confirmed: vec![finding("low")],
+            accepted: vec![finding("high"), finding("medium")],
+            dismissed: Vec::new(),
+        };
+
+        let ordered = super::ordered_findings(&report);
+        let severities: Vec<String> = ordered
+            .iter()
+            .map(|(finding, _)| finding.severity())
+            .collect();
+        assert_eq!(severities, ["high", "medium", "low"]);
+        assert_eq!(
+            super::severity_summary(&ordered),
+            "1 high · 1 medium · 1 low"
+        );
+    }
+
     #[gpui_kit::test]
     fn the_sidebar_toggles_from_the_keyboard(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -1376,9 +1570,9 @@ mod tests {
                 Some(2)
             );
 
-            window.press("secondary-b", cx);
+            window.press("cmd-b", cx);
             assert!(!view.read(cx).sidebar_visible);
-            window.press("secondary-b", cx);
+            window.press("cmd-b", cx);
             assert!(view.read(cx).sidebar_visible);
         })
         .unwrap();
@@ -1393,7 +1587,7 @@ mod tests {
         cx.update_window(handle, |_, window, cx| {
             focus_window(&view, window, cx);
             window.render_frame(cx);
-            window.press("secondary-f", cx);
+            window.press("cmd-f", cx);
             window.render_frame(cx);
             let filter_focus = view.read(cx).filter.focus_handle(cx);
             assert!(
