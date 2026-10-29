@@ -5,6 +5,7 @@ mod models;
 mod review;
 mod state;
 mod store;
+mod theme;
 mod time;
 
 use app::{Diffy, bind_keys};
@@ -20,9 +21,11 @@ fn open_diffy(cx: &mut App) {
         window_min_size: Some(size(px(880.), px(560.))),
         focus: true,
         titlebar: Some(TitlebarOptions {
-            title: Some("Diffy".into()),
-            appears_transparent: false,
-            traffic_light_position: None,
+            // The sidebar runs to the top edge and carries the wordmark, so the
+            // native title bar is transparent and the lights sit inside it.
+            title: Some("".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(18.), px(14.))),
         }),
         ..Default::default()
     };
@@ -60,6 +63,7 @@ fn main() -> Result<()> {
 
     application.run(|cx| {
         init(cx);
+        theme::install(cx);
         bind_keys(cx);
         open_diffy(cx);
     });

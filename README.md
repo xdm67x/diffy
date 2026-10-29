@@ -46,23 +46,28 @@ repository and PR number.
 
 ## The window
 
-The window puts the review requests in a sidebar on the left and the selected PR on the
-right. The sidebar is grouped by repository, newest PR first. Each row wraps long titles to
-two lines and shows the author, how long ago the PR changed, the number, and the state of
-that PR's latest review. A PR that changed after its newest review is marked **out of date**,
-so you know to run the review again before posting it. Hide the sidebar with the toolbar
-button or `⌘B` when you want the description and findings to fill the window; the same
-shortcut brings it back.
+Diffy opens in a dark, near-black window that sits next to an editor. The review requests
+live in a full-height sidebar on the left and the selected PR on the right. The window
+controls sit inside the sidebar, and the panel button beside them hides the list so the
+review can use the whole window; `⌘B` does the same.
+
+The sidebar starts with the filter field, then a **Review requests** header with the visible
+count and a refresh button, then the list grouped by repository, newest PR first. Each row
+wraps long titles to two lines and shows the author, how long ago the PR changed, the
+number, and the state of that PR's latest review. A PR that changed after its newest review
+is marked **out of date**, so you know to run the review again before posting it. The footer
+shows the total requests and repositories, or the reviews running right now.
 
 The review pane has a fixed header with the PR title, author, age, comment count, draft
 state, a link to GitHub, and the review actions. The body leads with the review, because
 that is what you opened the PR for: the verdict, the intent, the summary, the findings
 worst severity first, and the findings the judge filtered out. The PR description follows
-below as context. The status bar at the bottom shows your place in the list, the shortcut
-summary, and the last error or success message.
+below as context. The status bar at the bottom of the review pane shows your place in the
+list, the shortcut summary, and the last error or success message.
 
 The filter matches the repository, the PR title, the author, and the number (`#482`), so a
-queue can be narrowed without remembering which repository a PR belongs to.
+queue can be narrowed without remembering which repository a PR belongs to. The `⌘F` hint
+inside the field focuses it.
 
 ## Keys
 
@@ -82,8 +87,9 @@ Posting uses the buttons in the review header: **Comment**, **Request changes**,
 before you confirm. They are disabled while a post is in flight and while no finished
 review is shown.
 
-With the mouse you can click a PR to select it, scroll the PR list or the review pane, and
-use the toolbar buttons for refresh and for showing or hiding the sidebar.
+With the mouse you can click a PR to select it, scroll the PR list or the review pane, use
+the refresh button in the **Review requests** header, and use the panel button beside the
+window controls to show or hide the list.
 
 The filter only hides rows. Every fetched PR stays loaded, so clearing the filter brings
 all of your review requests back, and the selection follows a PR by its url rather than its
@@ -91,8 +97,8 @@ position. Failures (a failed refresh, review, save, or post) appear in the
 status bar and stay there until the next action.
 
 Reviews run per PR and concurrently: run one PR, select another, run it, and both run as
-independent instances. The toolbar shows how many reviews are running, and each list row
-tracks its own PR's stage. A PR is never reviewed twice at the same time; its **Run review**
+independent instances. The sidebar footer shows how many reviews are running, and each list
+row tracks its own PR's stage. A PR is never reviewed twice at the same time; its **Run review**
 button is disabled while it is running. A finished review of the PR you are reading resets
 the pane to the result; a background PR finishing does not disturb what you are looking at.
 

@@ -173,13 +173,7 @@ impl Diffy {
                     Ok(prs) => {
                         this.state.set_prs(prs);
                         this.notice = Some(Notice {
-                            text: format!(
-                                "{} review request{} across {} repo{}",
-                                this.state.prs.len(),
-                                plural(this.state.prs.len()),
-                                this.repo_count(),
-                                plural(this.repo_count())
-                            ),
+                            text: "Updated just now".to_string(),
                             tone: Tone::Info,
                         });
                         this.reset_selection_view(cx);
@@ -439,54 +433,32 @@ impl Diffy {
             .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
     }
 
-    fn toolbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn main_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .h_full()
+            .child(self.main_top_bar(cx))
+            .child(self.detail(cx))
+            .child(self.status_bar(cx))
+    }
+
+    /// The strip beside the traffic lights. It keeps the sidebar toggle in one
+    /// place whether the list is open or hidden, and gives the window a drag
+    /// surface above the content.
+    fn main_top_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
-            .h_12()
+            .h_9()
             .flex_shrink_0()
-            .px_3()
-            .gap_2()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(self.toggle_button(cx))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Diffy"))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!(
-                        "{} review request{} · {} repo{}",
-                        self.request_count(),
-                        plural(self.request_count()),
-                        self.repo_count(),
-                        plural(self.repo_count())
-                    )),
-            )
-            .child(div().flex_1())
-            .when(!self.state.active.is_empty(), |this| {
-                this.child(
-                    h_flex()
-                        .gap_2()
-                        .text_xs()
-                        .text_color(cx.theme().warning)
-                        .child(Spinner::new().small())
-                        .child(format!(
-                            "{} review{} running",
-                            self.state.active.len(),
-                            plural(self.state.active.len())
-                        )),
-                )
+            .px_4()
+            .items_center()
+            .window_control_area(WindowControlArea::Drag)
+            .when(!self.sidebar_visible, |this| {
+                // Clear the traffic lights before the toggle when the list is
+                // hidden and the main pane reaches the window's left edge.
+                this.pl_20().child(self.toggle_button(cx))
             })
-            .child(
-                Button::new("refresh")
-                    .ghost()
-                    .small()
-                    .icon(IconName::RefreshCw)
-                    .label("Refresh")
-                    .tooltip("Reload review requests (⌘R)")
-                    .loading(self.loading)
-                    .disabled(self.loading)
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-            )
     }
 
     fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -512,31 +484,10 @@ impl Diffy {
             }
         }
 
-        if self.state.rows.is_empty() && !self.loading {
-            list = list.child(
-                v_flex()
-                    .p_3()
-                    .gap_2()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(if self.state.filter.trim().is_empty() {
-                        "No review requests right now."
-                    } else {
-                        "No pull request matches this filter."
-                    })
-                    .when(!self.state.filter.trim().is_empty(), |this| {
-                        this.child(
-                            Button::new("clear-filter")
-                                .small()
-                                .label("Clear filter")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.state.clear_filter();
-                                    this.reset_selection_view(cx);
-                                })),
-                        )
-                    }),
-            );
-        }
+        let visible = self.state.prs.len();
+        let requests = self.request_count();
+        let repos = self.repo_count();
+        let active = self.state.active.len();
 
         v_flex()
             .w_80()
@@ -546,29 +497,110 @@ impl Diffy {
             .border_color(cx.theme().sidebar_border)
             .bg(cx.theme().sidebar)
             .child(
-                v_flex()
-                    .p_3()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(cx.theme().sidebar_border)
-                    .child(
-                        h_flex().justify_between().child(
+                h_flex()
+                    .h_9()
+                    .flex_shrink_0()
+                    .pl_20()
+                    .pr_3()
+                    .items_center()
+                    .window_control_area(WindowControlArea::Drag)
+                    .child(self.toggle_button(cx))
+                    .child(div().flex_1()),
+            )
+            .child(
+                v_flex().px_3().pb_3().child(
+                    Input::new(&self.filter)
+                        .id("repo-filter")
+                        .aria_label("Filter review requests")
+                        .bordered(false)
+                        .cleanable(true)
+                        .prefix(Icon::new(IconName::Search).small())
+                        .suffix(
                             div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(cx.theme().sidebar_foreground)
-                                .child("Review requests"),
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("⌘F"),
                         ),
+                ),
+            )
+            .child(
+                h_flex()
+                    .px_4()
+                    .pt_2()
+                    .pb_1()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Review requests"),
                     )
                     .child(
-                        Input::new(&self.filter)
-                            .id("repo-filter")
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(visible.to_string()),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("refresh")
+                            .ghost()
                             .small()
-                            .cleanable(true)
-                            .prefix(Icon::new(IconName::Search).small()),
+                            .icon(IconName::RefreshCw)
+                            .tooltip("Reload review requests (⌘R)")
+                            .loading(self.loading)
+                            .disabled(self.loading)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                     ),
             )
             .child(list)
+            .child(
+                h_flex()
+                    .h_9()
+                    .flex_shrink_0()
+                    .px_4()
+                    .gap_2()
+                    .items_center()
+                    .border_t_1()
+                    .border_color(cx.theme().sidebar_border)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(cx.theme().sidebar_foreground)
+                            .child("Diffy"),
+                    )
+                    .child(div().flex_1())
+                    .when(active > 0, |this| {
+                        this.child(
+                            h_flex()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(cx.theme().warning)
+                                .child(Spinner::new().small())
+                                .child(format!("{active} review{} running", plural(active))),
+                        )
+                    })
+                    .when(active == 0, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!(
+                                    "{requests} request{} · {repos} repo{}",
+                                    plural(requests),
+                                    plural(repos)
+                                )),
+                        )
+                    }),
+            )
     }
 
     fn repo_header(&self, repo: &str, count: usize, cx: &Context<Self>) -> impl IntoElement {
@@ -729,14 +761,14 @@ impl Diffy {
             return v_flex()
                 .flex_1()
                 .min_w_0()
-                .h_full()
+                .min_h_0()
                 .child(self.empty_detail(cx));
         };
         let history_len = self.state.review_history(&pr).len();
         v_flex()
             .flex_1()
             .min_w_0()
-            .h_full()
+            .min_h_0()
             .child(self.detail_header(&pr, history_len, cx))
             .child(
                 div()
@@ -759,41 +791,87 @@ impl Diffy {
     }
 
     fn empty_detail(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let loading = self.loading;
+        let filtered = !self.state.filter.trim().is_empty();
+        let (title, body) = if loading {
+            (
+                "Loading review requests",
+                "Fetching open PRs where you or your team is requested.",
+            )
+        } else if filtered {
+            (
+                "No pull request matches this filter",
+                "The filter searches the repository, the title, the author, and the number.",
+            )
+        } else {
+            (
+                "No review requests",
+                "Open pull requests where you or your team is asked to review appear here.",
+            )
+        };
+
         v_flex()
             .size_full()
             .justify_center()
             .items_center()
-            .gap_3()
+            .gap_4()
             .p_6()
-            .text_color(cx.theme().muted_foreground)
-            .child(Icon::new(IconName::Inbox).large())
-            .when(self.loading, |this| {
-                this.child(Spinner::new().large())
-                    .child("Loading review requests…")
+            .child(
+                div()
+                    .size_12()
+                    .rounded_lg()
+                    .bg(cx.theme().muted)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(loading, |this| this.child(Spinner::new().large()))
+                    .when(!loading, |this| {
+                        this.child(
+                            Icon::new(IconName::Inbox)
+                                .large()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                    }),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .items_center()
+                    .max_w_96()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_center()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(body),
+                    ),
+            )
+            .when(!loading && filtered, |this| {
+                this.child(
+                    Button::new("clear-filter-empty")
+                        .label("Clear filter")
+                        .outline()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state.clear_filter();
+                            this.reset_selection_view(cx);
+                        })),
+                )
             })
-            .when(
-                !self.loading && !self.state.filter.trim().is_empty(),
-                |this| {
-                    this.child("No pull request matches this filter.").child(
-                        Button::new("clear-filter-empty")
-                            .label("Clear filter")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.state.clear_filter();
-                                this.reset_selection_view(cx);
-                            })),
-                    )
-                },
-            )
-            .when(
-                !self.loading && self.state.filter.trim().is_empty(),
-                |this| {
-                    this.child("No review request is selected.").child(
-                        Button::new("refresh-empty")
-                            .label("Refresh")
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                    )
-                },
-            )
+            .when(!loading && !filtered, |this| {
+                this.child(
+                    Button::new("refresh-empty")
+                        .label("Refresh")
+                        .outline()
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                )
+            })
     }
 
     fn detail_header(
@@ -929,14 +1007,20 @@ impl Diffy {
         v_flex()
             .flex_shrink_0()
             .p_6()
+            .bg(cx.theme().sidebar)
             .border_b_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().sidebar_border)
             .child(v_flex().w_full().max_w(rems(40.)).mx_auto().child(header))
     }
 
     fn description(&mut self, pr: &PullRequest, cx: &Context<Self>) -> impl IntoElement {
         v_flex()
-            .gap_2()
+            .gap_3()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
             .child(section_title("Description", cx))
             .child(
                 TextView::markdown(
@@ -1076,75 +1160,100 @@ impl Diffy {
         let updated_ago =
             time::parse_utc(&pr.updated_at).map(|updated| time::ago(updated, time::now()));
 
+        let verdict_color = match report.verdict {
+            Verdict::Merge => cx.theme().success,
+            Verdict::RequestChanges => cx.theme().danger,
+        };
+        let verdict_icon = match report.verdict {
+            Verdict::Merge => IconName::CircleCheck,
+            Verdict::RequestChanges => IconName::CircleX,
+        };
+
         v_flex()
-            .gap_5()
+            .gap_6()
             .child(
-                h_flex()
+                v_flex()
                     .gap_3()
-                    .items_center()
-                    .child(verdict_tag(report.verdict).child(verdict_label(report.verdict)))
+                    .p_4()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(verdict_color.opacity(0.28))
+                    .bg(verdict_color.opacity(0.07))
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "reviewed {}",
-                                time::ago(reviewed_at as i64, time::now())
-                            )),
+                        h_flex()
+                            .gap_3()
+                            .items_center()
+                            .child(Icon::new(verdict_icon).small().text_color(verdict_color))
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(verdict_color)
+                                    .child(verdict_label(report.verdict)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "reviewed {}",
+                                        time::ago(reviewed_at as i64, time::now())
+                                    )),
+                            )
+                            .child(div().flex_1())
+                            .when(history_len > 1, |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!("Review {} of {}", index + 1, history_len)),
+                                )
+                                .child(
+                                    Button::new("older-review")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::ChevronLeft)
+                                        .tooltip("Older review")
+                                        .disabled(offset + 1 >= history_len)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.state.older_review();
+                                            this.reset_detail_scroll();
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("newer-review")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::ChevronRight)
+                                        .tooltip("Newer review")
+                                        .disabled(offset == 0)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.state.newer_review();
+                                            this.reset_detail_scroll();
+                                            cx.notify();
+                                        })),
+                                )
+                            }),
                     )
-                    .child(div().flex_1())
-                    .when(history_len > 1, |this| {
+                    .when(stale, |this| {
                         this.child(
-                            div()
+                            h_flex()
+                                .gap_2()
+                                .items_center()
                                 .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("Review {} of {}", index + 1, history_len)),
-                        )
-                        .child(
-                            Button::new("older-review")
-                                .ghost()
-                                .small()
-                                .icon(IconName::ChevronLeft)
-                                .tooltip("Older review")
-                                .disabled(offset + 1 >= history_len)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.state.older_review();
-                                    this.reset_detail_scroll();
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("newer-review")
-                                .ghost()
-                                .small()
-                                .icon(IconName::ChevronRight)
-                                .tooltip("Newer review")
-                                .disabled(offset == 0)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.state.newer_review();
-                                    this.reset_detail_scroll();
-                                    cx.notify();
-                                })),
+                                .text_color(cx.theme().warning)
+                                .child(Icon::new(IconName::CircleAlert).small())
+                                .child(match updated_ago {
+                                    Some(ago) => format!(
+                                        "The PR changed {ago}, after this review, so these findings may be out of date."
+                                    ),
+                                    None => "The PR changed after this review, so these findings may be out of date."
+                                        .to_string(),
+                                }),
                         )
                     }),
             )
-            .when(stale, |this| {
-                this.child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .text_xs()
-                        .text_color(cx.theme().warning)
-                        .child(Icon::new(IconName::CircleAlert).small())
-                        .child(match updated_ago {
-                            Some(ago) => format!(
-                                "The PR changed {ago}, after this review, so these findings may be out of date."
-                            ),
-                            None => "The PR changed after this review, so these findings may be out of date."
-                                .to_string(),
-                        }),
-                )
-            })
             .when(!report.intent.trim().is_empty(), |this| {
                 this.child(
                     v_flex()
@@ -1192,9 +1301,12 @@ impl Diffy {
             })
             .when(findings.is_empty(), |this| {
                 this.child(
-                    div()
+                    h_flex()
+                        .gap_2()
+                        .items_center()
                         .text_sm()
                         .text_color(cx.theme().success)
+                        .child(Icon::new(IconName::CircleCheck).small())
                         .child("No actionable findings were reported."),
                 )
             })
@@ -1238,6 +1350,8 @@ impl Diffy {
             .map(|index| format!("{} of {} · ", index + 1, self.state.prs.len()));
         let mut bar = StatusBar::new()
             .flex_shrink_0()
+            .h_9()
+            .px_4()
             .border_t_1()
             .border_color(cx.theme().border)
             .text_xs();
@@ -1291,16 +1405,13 @@ impl Render for Diffy {
             .on_action(cx.listener(Self::on_focus_filter))
             .on_action(cx.listener(Self::on_leave_filter))
             .on_action(cx.listener(Self::on_input_escape))
-            .child(self.toolbar(cx))
             .child(
                 h_flex()
                     .items_stretch()
-                    .flex_1()
-                    .min_h_0()
+                    .size_full()
                     .when(self.sidebar_visible, |this| this.child(self.sidebar(cx)))
-                    .child(self.detail(cx)),
+                    .child(self.main_pane(cx)),
             )
-            .child(self.status_bar(cx))
     }
 }
 
@@ -1359,10 +1470,11 @@ fn finding_card(finding: &Finding, source: &str, cx: &App) -> impl IntoElement {
     };
     v_flex()
         .gap_2()
-        .p_3()
+        .p_4()
         .rounded_lg()
         .border_1()
         .border_color(cx.theme().border)
+        .bg(cx.theme().popover)
         .child(
             h_flex()
                 .gap_2()
@@ -1393,13 +1505,6 @@ fn finding_card(finding: &Finding, source: &str, cx: &App) -> impl IntoElement {
                 .text_color(cx.theme().muted_foreground)
                 .child(source.to_string()),
         )
-}
-
-fn verdict_tag(verdict: Verdict) -> Tag {
-    match verdict {
-        Verdict::Merge => Tag::success(),
-        Verdict::RequestChanges => Tag::danger(),
-    }
 }
 
 fn verdict_label(verdict: Verdict) -> &'static str {
