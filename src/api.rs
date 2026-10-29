@@ -74,14 +74,6 @@ pub enum ReviewAction {
 }
 
 impl ReviewAction {
-    pub fn completed(self) -> &'static str {
-        match self {
-            ReviewAction::Approve => "approved",
-            ReviewAction::RequestChanges => "changes requested on",
-            ReviewAction::Comment => "commented on",
-        }
-    }
-
     fn flag(self) -> &'static str {
         match self {
             ReviewAction::Approve => "--approve",

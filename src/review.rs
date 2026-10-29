@@ -5,7 +5,6 @@ use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::sync::mpsc::Sender;
 use std::thread;
 
 const MAX_DIFF_CHARS: usize = 120_000;
@@ -51,31 +50,30 @@ pub enum ReviewEvent {
     },
 }
 
-pub fn spawn(pr: PullRequest, tx: Sender<ReviewEvent>) {
+/// Runs one review on its own thread and reports every stage through `on_event`.
+/// `on_event` is called from the review and reviewer threads, so it must be
+/// `Send + Sync` (the GPUI view forwards it onto the foreground thread).
+pub fn spawn(pr: PullRequest, on_event: impl Fn(ReviewEvent) + Send + Sync + 'static) {
     thread::spawn(move || {
         let url = pr.url.clone();
         let notify = |stage| {
-            let _ = tx.send(ReviewEvent::Stage {
+            on_event(ReviewEvent::Stage {
                 url: url.clone(),
                 stage,
             });
         };
         let progress = |text: String| {
-            let _ = tx.send(ReviewEvent::Progress {
+            on_event(ReviewEvent::Progress {
                 url: url.clone(),
                 text,
             });
         };
         match run(&pr, &notify, &progress) {
-            Ok(report) => {
-                let _ = tx.send(ReviewEvent::Done { url, report });
-            }
-            Err(error) => {
-                let _ = tx.send(ReviewEvent::Failed {
-                    url,
-                    error: format!("{error:#}"),
-                });
-            }
+            Ok(report) => on_event(ReviewEvent::Done { url, report }),
+            Err(error) => on_event(ReviewEvent::Failed {
+                url,
+                error: format!("{error:#}"),
+            }),
         }
     });
 }
