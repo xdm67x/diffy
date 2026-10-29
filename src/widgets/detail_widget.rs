@@ -5,12 +5,16 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget, Wrap};
+use std::time::Duration;
 
 pub struct DetailWidget<'a> {
     pr: Option<&'a PullRequest>,
     history: &'a [ReviewStatus],
     offset: usize,
     scroll: u16,
+    /// Last tool call of the running attempt, and how long it has been running.
+    progress: Option<&'a str>,
+    elapsed: Option<Duration>,
 }
 
 impl<'a> DetailWidget<'a> {
@@ -19,12 +23,16 @@ impl<'a> DetailWidget<'a> {
         history: &'a [ReviewStatus],
         offset: usize,
         scroll: u16,
+        progress: Option<&'a str>,
+        elapsed: Option<Duration>,
     ) -> Self {
         Self {
             pr,
             history,
             offset,
             scroll,
+            progress,
+            elapsed,
         }
     }
 }
@@ -76,7 +84,13 @@ impl Widget for DetailWidget<'_> {
 
                 lines.push(Line::default());
                 lines.push(heading("Review"));
-                push_review(&mut lines, self.history, self.offset);
+                push_review(
+                    &mut lines,
+                    self.history,
+                    self.offset,
+                    self.progress,
+                    self.elapsed,
+                );
                 lines.push(Line::default());
                 lines.push(Line::from(Span::styled(
                     "The reviewer council runs two independent reviewer agents in parallel \
@@ -118,7 +132,13 @@ fn heading(text: &str) -> Line<'static> {
     ))
 }
 
-fn push_review(lines: &mut Vec<Line<'_>>, history: &[ReviewStatus], offset: usize) {
+fn push_review(
+    lines: &mut Vec<Line<'_>>,
+    history: &[ReviewStatus],
+    offset: usize,
+    progress: Option<&str>,
+    elapsed: Option<Duration>,
+) {
     if history.is_empty() {
         lines.push(Line::from(Span::styled(
             "Not reviewed yet. Press Enter or r to run the review council.",
@@ -138,16 +158,40 @@ fn push_review(lines: &mut Vec<Line<'_>>, history: &[ReviewStatus], offset: usiz
         )));
         lines.push(Line::default());
     }
-    push_status(lines, &history[index]);
+    // Only the newest attempt is running, so older history has no live activity.
+    let (progress, elapsed) = if index + 1 == history.len() {
+        (progress, elapsed)
+    } else {
+        (None, None)
+    };
+    push_status(lines, &history[index], progress, elapsed);
 }
 
-fn push_status(lines: &mut Vec<Line<'_>>, status: &ReviewStatus) {
+fn push_status(
+    lines: &mut Vec<Line<'_>>,
+    status: &ReviewStatus,
+    progress: Option<&str>,
+    elapsed: Option<Duration>,
+) {
     match status {
         ReviewStatus::Running(stage) => {
-            lines.push(Line::from(Span::styled(
-                format!("● {}", stage.label()),
-                Style::new().fg(Color::Yellow).bold(),
-            )));
+            let running_for = elapsed.map(|elapsed| format!("  ·  {}s", elapsed.as_secs()));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("● {}", stage.label()),
+                    Style::new().fg(Color::Yellow).bold(),
+                ),
+                Span::styled(
+                    running_for.unwrap_or_default(),
+                    Style::new().fg(Color::DarkGray),
+                ),
+            ]));
+            if let Some(progress) = progress {
+                lines.push(Line::from(vec![
+                    Span::styled("  → ", Style::new().fg(Color::DarkGray)),
+                    Span::styled(progress.to_string(), Style::new().fg(Color::Gray)),
+                ]));
+            }
             lines.push(Line::from(Span::styled(
                 "Claude is working. The PR list updates when it finishes.",
                 Style::new().fg(Color::DarkGray),

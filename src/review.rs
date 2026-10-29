@@ -5,11 +5,8 @@ use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
-use std::process;
 use std::sync::mpsc::Sender;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_DIFF_CHARS: usize = 120_000;
 
@@ -35,9 +32,23 @@ impl Stage {
 
 #[derive(Debug)]
 pub enum ReviewEvent {
-    Stage { url: String, stage: Stage },
-    Done { url: String, report: ReviewReport },
-    Failed { url: String, error: String },
+    Stage {
+        url: String,
+        stage: Stage,
+    },
+    /// What a session is doing right now, e.g. the `gh` command it just ran.
+    Progress {
+        url: String,
+        text: String,
+    },
+    Done {
+        url: String,
+        report: ReviewReport,
+    },
+    Failed {
+        url: String,
+        error: String,
+    },
 }
 
 pub fn spawn(pr: PullRequest, tx: Sender<ReviewEvent>) {
@@ -49,7 +60,13 @@ pub fn spawn(pr: PullRequest, tx: Sender<ReviewEvent>) {
                 stage,
             });
         };
-        match run(&pr, &notify) {
+        let progress = |text: String| {
+            let _ = tx.send(ReviewEvent::Progress {
+                url: url.clone(),
+                text,
+            });
+        };
+        match run(&pr, &notify, &progress) {
             Ok(report) => {
                 let _ = tx.send(ReviewEvent::Done { url, report });
             }
@@ -63,7 +80,11 @@ pub fn spawn(pr: PullRequest, tx: Sender<ReviewEvent>) {
     });
 }
 
-fn run(pr: &PullRequest, notify: &dyn Fn(Stage)) -> Result<ReviewReport> {
+fn run(
+    pr: &PullRequest,
+    notify: &dyn Fn(Stage),
+    progress: &(dyn Fn(String) + Sync),
+) -> Result<ReviewReport> {
     let system_prompt = load_system_prompt()?;
 
     notify(Stage::FetchingDiff);
@@ -79,17 +100,18 @@ fn run(pr: &PullRequest, notify: &dyn Fn(Stage)) -> Result<ReviewReport> {
     };
 
     let reviewer_prompt = reviewer_prompt(pr, &diff_block);
-    let agents_file = write_agents_file(&system_prompt)?;
 
     notify(Stage::Reviewing);
+    let progress_a = |line: &str| progress(format!("reviewer 1 · {line}"));
+    let progress_b = |line: &str| progress(format!("reviewer 2 · {line}"));
+    // Plain headless sessions, same flags as the judge: a custom agent's tool
+    // grant does not always inherit the CLI allowlist, which left reviewers
+    // unable to run `gh`.
     let (raw_a, raw_b) = thread::scope(|scope| {
-        let handle_a =
-            scope.spawn(|| claude::run_agent(&agents_file, "reviewer", &reviewer_prompt));
-        let handle_b =
-            scope.spawn(|| claude::run_agent(&agents_file, "reviewer", &reviewer_prompt));
+        let handle_a = scope.spawn(|| claude::run(&system_prompt, &reviewer_prompt, &progress_a));
+        let handle_b = scope.spawn(|| claude::run(&system_prompt, &reviewer_prompt, &progress_b));
         (join_reviewer(handle_a), join_reviewer(handle_b))
     });
-    let _ = fs::remove_file(&agents_file);
     let output_a: ReviewerOutput = claude::parse_json(&raw_a?)?;
     let output_b: ReviewerOutput = claude::parse_json(&raw_b?)?;
 
@@ -98,7 +120,9 @@ fn run(pr: &PullRequest, notify: &dyn Fn(Stage)) -> Result<ReviewReport> {
 
     notify(Stage::Judging);
     let judge_prompt = judge_prompt(pr, &diff_block, &confirmed, &singles);
-    let judge_raw = claude::run(&system_prompt, &judge_prompt)?;
+    let judge_raw = claude::run(&system_prompt, &judge_prompt, &|line| {
+        progress(format!("judge · {line}"))
+    })?;
     let judge: JudgeOutput = claude::parse_json(&judge_raw)?;
 
     Ok(build_report(judge, confirmed, singles))
@@ -118,24 +142,6 @@ fn load_system_prompt() -> Result<String> {
     }
 }
 
-fn write_agents_file(system_prompt: &str) -> Result<PathBuf> {
-    let definition = serde_json::json!({
-        "reviewer": {
-            "description": "Independent pull request reviewer. Diffy launches two instances of this agent in parallel with identical prompts.",
-            "prompt": system_prompt,
-            "tools": ["Bash", "Read", "Glob", "Grep"]
-        }
-    });
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| eyre!("system clock is before the Unix epoch: {error}"))?
-        .as_nanos();
-    let path = env::temp_dir().join(format!("diffy-agents-{}-{unique}.json", process::id()));
-    fs::write(&path, serde_json::to_vec_pretty(&definition)?)
-        .wrap_err_with(|| format!("could not write agents file at {}", path.display()))?;
-    Ok(path)
-}
-
 fn reviewer_prompt(pr: &PullRequest, diff: &str) -> String {
     format!(
         r#"ROLE: independent reviewer.
@@ -146,6 +152,11 @@ prompt and context, but each has a fresh context of its own. Work independently.
 Review the pull request below. The diff is the starting point. You have `Bash`, `Read`,
 `Glob`, and `Grep`, and you may inspect the actual PR branch when the diff alone cannot
 answer a question.
+
+Bash is available, but only commands starting with `gh`, `git`, `mktemp`, or
+`rm -rf /tmp/diffy-review-*` are allowed. Anything else is refused by a permission rule.
+Never report that Bash is unavailable: if a command is refused, use `gh` instead or fall
+back to the diff. Always reach for `gh` first.
 
 Tool rules:
 - Use `gh pr view <url> --json title,body,files,commits,headRefName,baseRefName` to verify
@@ -234,7 +245,9 @@ Then decide the merge verdict. Merge only if the diff is sound and it fulfils th
 the PR description. If the description asks for something the diff does not do, request changes.
 
 You have `Bash`, `Read`, `Glob`, and `Grep`. Use them to verify a finding or an intent claim
-against the actual PR branch when the diff is not enough:
+against the actual PR branch when the diff is not enough. Bash is available but only
+commands starting with `gh`, `git`, `mktemp`, or `rm -rf /tmp/diffy-review-*` are allowed;
+anything else is refused, so always use `gh` first and never claim Bash is missing. Use
 `gh pr view <url> --json title,body,files,commits,headRefName,baseRefName`, or clone with
 `gh repo clone {repo} /tmp/diffy-review-<unique> -- --depth=50`, then
 `git -C /tmp/diffy-review-<unique> fetch origin pull/{number}/head:diffy-review --depth=50`

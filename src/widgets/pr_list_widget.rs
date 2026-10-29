@@ -11,6 +11,7 @@ pub struct PrListWidget<'a> {
     rows: &'a [Row],
     prs: &'a [PullRequest],
     reviews: &'a HashMap<String, Vec<ReviewStatus>>,
+    progress: &'a HashMap<String, String>,
     selected_row: usize,
 }
 
@@ -19,12 +20,14 @@ impl<'a> PrListWidget<'a> {
         rows: &'a [Row],
         prs: &'a [PullRequest],
         reviews: &'a HashMap<String, Vec<ReviewStatus>>,
+        progress: &'a HashMap<String, String>,
         selected_row: usize,
     ) -> Self {
         Self {
             rows,
             prs,
             reviews,
+            progress,
             selected_row,
         }
     }
@@ -57,9 +60,14 @@ impl StatefulWidget for PrListWidget<'_> {
                     let (marker, color, status) =
                         match self.reviews.get(&pr.url).and_then(|history| history.last()) {
                             None => ("○", Color::DarkGray, "not reviewed".to_string()),
-                            Some(ReviewStatus::Running(stage)) => {
-                                ("●", Color::Yellow, stage.label().to_string())
-                            }
+                            Some(ReviewStatus::Running(stage)) => (
+                                "●",
+                                Color::Yellow,
+                                self.progress
+                                    .get(&pr.url)
+                                    .cloned()
+                                    .unwrap_or_else(|| stage.label().to_string()),
+                            ),
                             Some(ReviewStatus::Done(report)) => match report.verdict {
                                 crate::models::Verdict::Merge => {
                                     ("✔", Color::Green, "merge".to_string())

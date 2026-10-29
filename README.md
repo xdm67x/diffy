@@ -74,7 +74,7 @@ appear as a toast in the bottom-right corner and disappear on their own.
 
 Reviews run per PR and concurrently: press `Enter` on one PR, move to another, press
 `Enter` again, and both run as independent instances. The header shows how many reviews
-are running, and each list row tracks its own PR's stage. A PR is never reviewed twice at
+are running, and each list row tracks its own PR's stage and last tool call. A PR is never reviewed twice at
 the same time; `Enter` on a PR that is already running only shows a toast. A finished review
 of a PR you are reading resets the pane to the result; a background PR finishing does not
 disturb what you are looking at.
@@ -93,15 +93,18 @@ versioned file. Sessions are not persisted.
 
 Each session has `Bash`, `Read`, `Glob`, and `Grep`. Bash is pre-approved only for `gh`,
 `git`, `mktemp`, and removal of `/tmp/diffy-review-*` directories; other actions are
-denied rather than prompting. Reviewers can therefore verify the PR with `gh`, fetch the
-full diff, or clone the PR branch into a temporary directory and inspect files outside
-the diff.
+denied rather than prompting. The prompt tells the reviewers to reach for `gh` first —
+`gh pr view`, `gh pr diff`, then a temporary clone read with `Read`/`Glob`/`Grep` — and
+never to report Bash as unavailable when a command is refused.
 
-1. **Two independent reviewer agents run at the same time.** Diffy starts two instances
-   of the same custom Claude agent (`reviewer`, defined through `--agents` and launched
-   with `--agent reviewer`). Both get the same system prompt, the same task prompt, and
-   the same PR context, but each has a fresh context. Each returns a JSON list of
-   findings with file, line, severity, and evidence.
+Sessions run with `--output-format stream-json`, so every tool call is relayed to the UI.
+While a review runs, its list row shows the latest command (`reviewer 1 · gh pr diff …`)
+and the detail pane shows the stage, the elapsed time, and the same activity line.
+
+1. **Two independent reviewer agents run at the same time.** Diffy starts two headless
+   Claude sessions with the same flags as the judge and passes `SYSTEM_PROMPT.md` with
+   `--system-prompt`. Both get the same task prompt and PR context, but each has a fresh
+   context. Each returns a JSON list of findings with file, line, severity, and evidence.
 2. **Diffy merges the findings.** A finding reported by both reviewers (same file and
    sufficiently similar text) is marked **confirmed** and is relevant by rule. A finding
    reported by only one reviewer goes to the judge.

@@ -40,6 +40,10 @@ pub struct State {
     pub submit_mode: bool,
     /// PR urls with a review running right now. One review per PR, any number at once.
     pub active: HashSet<String>,
+    /// Last thing each running review was seen doing, keyed by PR url.
+    pub progress: HashMap<String, String>,
+    /// When each running review started, keyed by PR url.
+    pub started: HashMap<String, Instant>,
     pub detail_scroll: u16,
     pub toast: Option<Toast>,
     /// Repository filter, empty means every repo is shown.
@@ -61,6 +65,8 @@ impl State {
             review_offset: 0,
             submit_mode: false,
             active: HashSet::new(),
+            progress: HashMap::new(),
+            started: HashMap::new(),
             detail_scroll: 0,
             toast: None,
             filter: String::new(),
@@ -229,6 +235,8 @@ impl State {
             .entry(pr.url.clone())
             .or_default()
             .push(ReviewStatus::Running(Stage::FetchingDiff));
+        self.progress.remove(&pr.url);
+        self.started.insert(pr.url.clone(), Instant::now());
         self.review_offset = 0;
         self.submit_mode = false;
         self.detail_scroll = 0;
@@ -249,9 +257,15 @@ impl State {
         match event {
             ReviewEvent::Stage { url, stage } => {
                 if self.active.contains(&url)
-                    && let Some(last) = self.reviews.entry(url).or_default().last_mut()
+                    && let Some(last) = self.reviews.entry(url.clone()).or_default().last_mut()
                 {
                     *last = ReviewStatus::Running(stage);
+                    self.progress.remove(&url);
+                }
+            }
+            ReviewEvent::Progress { url, text } => {
+                if self.active.contains(&url) {
+                    self.progress.insert(url, text);
                 }
             }
             ReviewEvent::Done { url, report } => {
@@ -287,6 +301,8 @@ impl State {
 
     /// Replaces the running attempt, or appends when the event has no matching attempt.
     fn settle_review(&mut self, url: String, status: ReviewStatus) {
+        self.progress.remove(&url);
+        self.started.remove(&url);
         let history = self.reviews.entry(url).or_default();
         if matches!(history.last(), Some(ReviewStatus::Running(_))) {
             history.pop();
@@ -457,6 +473,40 @@ mod tests {
         assert!(state.active.is_empty());
         assert_eq!(state.review_history(&first).len(), 1);
         assert_eq!(state.review_history(&second).len(), 1);
+    }
+
+    #[test]
+    fn live_progress_follows_the_running_attempt_and_is_cleared() {
+        let mut state = State::new(vec![pr(1, "acme/api")]);
+        let pull = state.selected_pr().unwrap().clone();
+        state.begin_review().unwrap();
+        assert!(state.started.contains_key(&pull.url));
+
+        state.apply(ReviewEvent::Progress {
+            url: pull.url.clone(),
+            text: "reviewer 1 · gh pr diff".to_string(),
+        });
+        assert_eq!(state.progress[&pull.url], "reviewer 1 · gh pr diff");
+
+        state.apply(ReviewEvent::Stage {
+            url: pull.url.clone(),
+            stage: Stage::Judging,
+        });
+        assert!(
+            state.progress.is_empty(),
+            "a new stage drops the previous activity"
+        );
+
+        state.apply(ReviewEvent::Progress {
+            url: pull.url.clone(),
+            text: "judge · gh pr view".to_string(),
+        });
+        finish(&mut state, &pull.url, "done");
+        assert!(
+            state.progress.is_empty(),
+            "finished reviews keep no activity"
+        );
+        assert!(state.started.is_empty());
     }
 
     #[test]

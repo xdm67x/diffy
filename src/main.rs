@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use std::io::stdout;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -196,7 +196,13 @@ fn render(frame: &mut Frame, state: &mut State) {
 
     let mut list_state = state.list_state;
     frame.render_stateful_widget(
-        PrListWidget::new(&state.rows, &state.prs, &state.reviews, state.selected_row),
+        PrListWidget::new(
+            &state.rows,
+            &state.prs,
+            &state.reviews,
+            &state.progress,
+            state.selected_row,
+        ),
         list_area,
         &mut list_state,
     );
@@ -204,8 +210,25 @@ fn render(frame: &mut Frame, state: &mut State) {
 
     let pr = state.selected_pr();
     let history = pr.map(|pr| state.review_history(pr)).unwrap_or(&[]);
+    // Live activity is shown only while the newest attempt of the selected PR runs.
+    let running = pr.filter(|pr| {
+        state.review_offset == 0 && matches!(state.shown_status(pr), Some(ReviewStatus::Running(_)))
+    });
+    let progress = running
+        .and_then(|pr| state.progress.get(&pr.url))
+        .map(String::as_str);
+    let elapsed = running
+        .and_then(|pr| state.started.get(&pr.url))
+        .map(Instant::elapsed);
     frame.render_widget(
-        DetailWidget::new(pr, history, state.review_offset, state.detail_scroll),
+        DetailWidget::new(
+            pr,
+            history,
+            state.review_offset,
+            state.detail_scroll,
+            progress,
+            elapsed,
+        ),
         detail_area,
     );
 
