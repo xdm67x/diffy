@@ -32,6 +32,12 @@ fn search_dirs() -> Vec<PathBuf> {
         dirs.push(home.join(".local/bin"));
         dirs.push(home.join(".cargo/bin"));
         dirs.push(home.join(".claude/local"));
+        // A launchd PATH skips the shell profile, so the mise shims directory
+        // (where mise puts every tool it manages, `gh` included) is invisible.
+        let mise = env::var_os("MISE_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/share/mise"));
+        dirs.push(mise.join("shims"));
     }
     dirs
 }
@@ -65,6 +71,12 @@ mod tests {
         let dirs = search_dirs();
         assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")));
         assert!(dirs.iter().any(|dir| dir.ends_with(".local/bin")));
+        let mise = env::var_os("MISE_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env::var_os("HOME").unwrap()).join(".local/share/mise")
+            });
+        assert!(dirs.contains(&mise.join("shims")));
     }
 
     #[test]
