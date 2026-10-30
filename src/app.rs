@@ -1317,7 +1317,6 @@ impl Diffy {
                             Input::new(&self.filter)
                                 .id("pr-filter")
                                 .aria_label("Filter pull requests")
-                                .bordered(false)
                                 .cleanable(true)
                                 .prefix(Icon::new(IconName::Search).small())
                                 .suffix(
