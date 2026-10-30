@@ -9,8 +9,11 @@ PR's diff in from the right as a read-only, syntax-highlighted panel and ask Cla
 line of it, and you can post a review to GitHub as an approval, a request for changes, or a
 comment.
 
-The review list lives in an always-open sidebar beside the review. The interface is built with
-[GPUI](https://gpui.rs/) and [GPUI Kit](https://gpui-kit.com/).
+The window has three panels — repositories, the selected repo's pull requests, and the
+review — and the two left panels resize by dragging their seams. The Settings button in the
+repositories panel switches between light and dark themes and sets a template for the comment
+posted to GitHub. The interface is built with [GPUI](https://gpui.rs/) and
+[GPUI Kit](https://gpui-kit.com/). The design is documented in [DESIGN.md](DESIGN.md).
 
 ## Requirements
 
@@ -69,16 +72,23 @@ an open draft is not ready to review yet.
 
 ## The window
 
-Diffy opens in a dark, near-black window that sits next to an editor. The pull requests
-live in a full-height sidebar on the left and the selected PR on the right. The window
-controls sit inside the sidebar, which stays open beside the review.
+Diffy opens in a light, white window with an orange accent (a dark near-black theme with the
+same orange accent is available in Settings). The window has three panels: repositories on
+the left, the selected repository's pull requests in the middle, and the selected PR's
+review on the right. Both left panels resize by dragging the seam between them (double-click
+a seam to restore its default width), and their widths are remembered between launches. The
+window controls sit inside the repositories panel, which stays open beside the review.
 
-The sidebar starts with the filter field, then a **Pull requests** header with the visible
-count and a refresh button, then the list grouped by repository, newest PR first. Each row
-wraps long titles to two lines and shows the author, how long ago the PR changed, the
-number, and the state of that PR's latest review. A PR that changed after its newest review
-is marked **out of date**, so you know to run the review again before posting it. The footer
-shows the total pull requests and repositories, or the reviews running right now.
+The repositories panel lists every repo with open PRs waiting on you, with a count per repo,
+plus a **Settings** button at the bottom. Selecting a repo switches the middle list to its
+PRs and selects the newest one.
+
+The PR list starts with the filter field, then a header with the repo name, the visible
+count, and a refresh button, then the PR rows, newest first. Each row wraps long titles to
+two lines and shows the author, how long ago the PR changed, the number, and the state of
+that PR's latest review. A PR that changed after its newest review is marked **out of date**,
+so you know to run the review again before posting it. The footer shows the total pull
+requests and repositories, or the reviews running right now.
 
 The review pane has a fixed header with the PR title, author, age, comment count, a **Yours**
 tag on the PRs you wrote, a link to GitHub, the review actions, and a **Diff** button. The pane
@@ -109,9 +119,15 @@ next refresh.
 The status bar at the bottom of the review pane shows your place in the list, the shortcut
 summary, and the last error or success message.
 
-The filter matches the repository, the PR title, the author, and the number (`#482`), so a
-queue can be narrowed without remembering which repository a PR belongs to. The `⌘F` hint
-inside the field focuses it.
+The filter matches the PR title, the author, and the number (`#482`) within the selected
+repository, so a queue can be narrowed without leaving the repo. The `⌘F` hint inside the
+field focuses it. Repositories are switched in the left panel, not through the filter.
+
+The **Settings** dialog (the button in the repositories panel) has two preferences: the
+color theme (**Light** / **Dark**, applied immediately) and the **GitHub comment template** —
+a template with placeholders (`{pr}`, `{url}`, `{verdict}`, `{summary}`, `{intent}`,
+`{findings}`, `{dismissed}`) for the body of the review comment posted to GitHub; leave it
+empty for the built-in format. Both are saved to `~/.diffy/settings.json`.
 
 ## Keys
 
@@ -133,17 +149,18 @@ field, and nothing is posted before you confirm. They are disabled while a post 
 and while no finished review is shown. On a PR you wrote, GitHub refuses an approval and a
 change request of your own work, so only **Comment** is offered there.
 
-With the mouse you can click a PR to select it, scroll the PR list or the review pane, hover a
-diff line and use **Ask to agent…**, resize or close the diff panel, and use the refresh button
-in the **Pull requests** header.
+With the mouse you can click a repository or a PR to select it, drag a seam between panels to
+resize it, scroll the PR list or the review pane, hover a diff line and use
+**Ask to agent…**, resize or close the diff panel, use the refresh button in the PR list
+header, and open Settings from the repositories panel.
 
-The filter only hides rows. Every fetched PR stays loaded, so clearing the filter brings
-all of your pull requests back, and the selection follows a PR by its url rather than its
-position. Failures (a failed refresh, review, save, or post) appear in the
-status bar and stay there until the next action.
+The filter only hides rows of the selected repository. Every fetched PR stays loaded, so
+switching repositories or clearing the filter brings all of your pull requests back, and the
+selection follows a PR by its url rather than its position. Failures (a failed refresh,
+review, save, or post) appear in the status bar and stay there until the next action.
 
 Reviews run per PR and concurrently: run one PR, select another, run it, and both run as
-independent instances. The sidebar footer shows how many reviews are running, and each list
+independent instances. The PR list footer shows how many reviews are running, and each list
 row tracks its own PR's stage. A PR is never reviewed twice at the same time; its **Run review**
 button is disabled while it is running. A finished review of the PR you are reading resets
 the pane to the result; a background PR finishing does not disturb what you are looking at.
@@ -202,6 +219,11 @@ is part of the diff. The confirmation dialog shows the body in a text field, and
 it holds when you confirm is what gets posted. The body goes to `gh` through stdin, so its
 length is not limited by the command line.
 
+The initial body comes from the **GitHub comment template** in Settings when one is set —
+the template's placeholders (`{pr}`, `{verdict}`, `{summary}`, `{findings}`, …) are filled
+with the report — and from the built-in format otherwise. You can still edit the body in the
+confirmation dialog before posting.
+
 Nothing is posted before you confirm the dialog, and a failure (for example a revoked token)
 shows up in the status bar. Diffy does not record which reviews were posted, so posting the
 same report twice creates two GitHub reviews.
@@ -250,6 +272,9 @@ tail -f "$(ls -t ~/.diffy/logs/*.log | head -1)"
 | Field | Meaning |
 | --- | --- |
 | `teams` | Teams whose review requests count as yours, e.g. `["acme/backend"]` |
+| `theme` | `"light"` (default) or `"dark"`; also settable in the app's Settings dialog |
+| `comment_template` | Template for the review comment posted to GitHub; placeholders `{pr}` `{url}` `{verdict}` `{summary}` `{intent}` `{findings}` `{dismissed}`. Empty/absent uses the built-in format |
+| `panels` | `{"repos": 200, "prs": 240}` — persisted widths of the two left panels |
 
 Environment:
 
@@ -285,13 +310,15 @@ with write access. Their answers are shown in Diffy only and are never posted.
 ```
 src/
   main.rs                    bootstrap, window options, key bindings
-  app.rs                     GPUI view: sidebar, review pane, diff side panel, ask-to-agent, posting dialog
+  app.rs                     GPUI view: the three panels (repositories, PR list, review), resizable
+                             seams, settings dialog, diff side panel, ask-to-agent, posting dialog
   ask.rs                     read-only "ask to agent" sessions about one diff line
-  state.rs                   PR list, filter, selection, review history (no UI types)
+  state.rs                   repositories, selected repo, PR list, filter, selection, review history
   api.rs                     gh search / gh pr diff / gh pr review
-  models.rs                  PRs, findings, verdicts, repo grouping
+  models.rs                  PRs, findings, verdicts, repo grouping, comment template rendering
   review.rs                  reviewer council, finding matching, judge
   claude.rs                  headless Claude invocation (reviewer and read-only), JSON extraction
+  theme.rs                   light and dark palettes, installed from the saved theme preference
   store.rs                   ~/.diffy settings and saved review log
   log.rs                     ~/.diffy/logs, one file per UTC day
 SYSTEM_PROMPT.md             system prompt for reviewers and judge, embedded at build time
@@ -305,7 +332,8 @@ cargo clippy --all-targets
 cargo test
 ```
 
-The matching, JSON-parsing, review-log, and PR-list state logic have unit tests. `cargo
-test` also runs the headless GPUI integration tests, which render the real window and drive
-the keyboard paths for selection and the repository filter. The Claude
-calls are not exercised in tests because they need credentials and cost money.
+The matching, JSON-parsing, review-log, settings, comment-template, and PR-list state logic
+have unit tests. `cargo test` also runs the headless GPUI integration tests, which render the
+real window and drive the keyboard paths for repo selection, the filter, the resizable
+panels, and the settings dialog. The Claude calls are not exercised in tests because they
+need credentials and cost money.
