@@ -18,13 +18,16 @@ the middle, the selected PR's review on the right.
 │ ┌────────────────┐ │ ┌──────────────────────┐ │ ┌────────────────────────────────┐ │
 │ │ top: Diffy     │ │ │ filter (⌘F)          │ │ │ top strip: drag region         │ │
 │ ├────────────────┤ │ ├──────────────────────┤ │ ├────────────────────────────────┤ │
-│ │ Repositories 2 │ │ │ acme/api 3  ⟳        │ │ │ header: title, meta, actions   │ │
-│ │  acme/api   2  │ │ │   PR rows…           │ │ ├────────────────────────────────┤ │
-│ │  acme/web   1  │ │ │   (status marker per │ │ │ body: description, review,     │ │
-│ ├────────────────┤ │ │    row)              │ │ │ history                        │ │
-│ │ ⚙ Settings · 3 │ │ ├──────────────────────┤ │ └────────────────────────────────┘ │
-│ └────────────────┘ │ │ status strip         │ │ status bar: position · hints ·   │
-│                    │ └──────────────────────┘ │ notice                           │
+│ │ Repositories 2 │ │ │ acme/api 3  ⟳        │ │ │ header: title, link, meta,     │ │
+│ │  acme/api   2  │ │ │   PR rows…           │ │ │ actions                        │ │
+│ │  acme/web   1  │ │ │   (status marker per │ │ ├────────────────────────────────┤ │
+│ ├────────────────┤ │ │    row)              │ │ │ description (fills the pane)   │ │
+│ │ ⚙ Settings · 3 │ │ ├──────────────────────┤ │ ├────────────────────────────────┤ │
+│ └────────────────┘ │ │ status strip         │ │ │ Diff ▾ strip (collapsed)       │ │
+│                    │ └──────────────────────┘ │ ├────────────────────────────────┤ │
+│                    │                          │ │ Review ▾ strip (tinted)        │ │
+│                    │                          │ │ status bar: position · hints · │
+│                    │                          │ │ notice                         │
 └────────────────────┴──────────────────────────┴────────────────────────────────────┘
    ▲ drag to resize        ▲ drag to resize
 ```
@@ -36,17 +39,21 @@ the middle, the selected PR's review on the right.
   (not reviewed / running / merge / changes requested / failed). The filter (⌘F) narrows
   this list by title, author, and number. The selected row gets a soft orange fill; the
   bottom strip shows the running-review count or the totals.
-- **Right panel — the detail.** The selected PR: a header band with number, repo, title,
-  author, and the actions (`Run review`, `Diff`, and once a review exists `Comment`,
-  `Request changes`, `Approve`), then a scrollable body with the description, the review
-  report (verdict, summary, findings worst-first with a severity count), and the review
-  history. The status bar at the bottom shows the selection position, the shortcut hints, and
-  transient notices.
-- **The diff is an overlay, not a fourth panel.** `Diff` (⌘2) slides a read-only,
-  syntax-highlighted patch in from the right as a sheet at 62% of the window width, capped
-  at the current width of the detail panel (the window minus the two side panels), without
-  dimming the review, so selecting another PR swaps the patch in place. It carries a
-  per-line "Ask to agent" affordance whose answers render as cards on the line.
+- **Right panel — the detail.** The selected PR: a compact header band (title with the
+  `Yours` tag and the "Open on GitHub" link, a metadata line with number, repo, author, age,
+  comments, and the actions — `Run review`, and once a review exists `Comment`,
+  `Request changes`, `Approve`), then a body of collapsible sections: the **description**
+  fills the pane while the **diff** and **review** are collapsed strips. The status bar at
+  the bottom shows the selection position, the shortcut hints, and transient notices.
+- **Collapsible sections.** The diff and the review are sections inside the detail panel,
+  not overlays, and both are collapsed by default: only their header rows show (the review
+  strip also shows the verdict or the running stage), while the PR description fills the
+  pane. Each header is a toggle: expanding a section gives it the full body and hides the
+  rest — the PR description included — until it is collapsed again. The review section
+  paints one tone off the ground (`sidebar`), so the cut from the description and diff is
+  visible. The diff is read-only and syntax-highlighted and carries a per-line "+" ask
+  affordance whose answers render as cards on the line; ⌘2 expands or collapses the review
+  section.
 
 The native title bar is transparent and the traffic lights float inside the repositories
 panel's top strip, with the wordmark centred in it.
@@ -109,7 +116,7 @@ tokens, so every component reads them by semantic role.
 | Text selection | `selection` | `#FED7AA` | |
 | Success / danger / warning | `success`, `danger`, `warning` | `#15803D` / `#B42318` / `#B45309` | dark steps, ≥5:1 as text on white and as button fills with white labels |
 
-Code in the diff panel is highlighted with the syntax theme of the active mode (light or
+Code in the diff section is highlighted with the syntax theme of the active mode (light or
 dark). Radii are 7 px for controls and 11 px for large surfaces. The dark palette mirrors the
 table above: ground `#050506`, ink `#EDEDED`, muted text `#A1A1AA`, hairlines `#26262C`,
 primary `#EA580C` with a black label (5.9:1), ring/caret `#EA580C` (5.7:1 on the ground),
@@ -120,9 +127,9 @@ links `#FB923C`, selected row `#331D0E`/`#9A3412`, status colors `#3FC07A` / `#E
 
 - The platform UI font everywhere except code, progress lines, and the filter's `⌘F` hint,
   which use the mono font. Base text is `text_sm` (14 px); the PR title is the only large
-  display size (`text_2xl` semibold).
-- Spacing follows the shared semantic scale; the detail body is a centred 40 rem column so
-  long reviews keep a readable measure.
+  display size (`text_xl` semibold).
+- Spacing follows the shared semantic scale; the expanded review section keeps a centred
+  40 rem column so long reports keep a readable measure, while the diff uses the full width.
 - States are visible without hover: the selected row keeps its fill, running reviews show a
   spinner with the stage and elapsed seconds, a review older than the latest push is marked
   "out of date" in the warning color, failures render an inline error card with a retry, and
@@ -135,7 +142,7 @@ links `#FB923C`, selected row `#331D0E`/`#9A3412`, status colors `#3FC07A` / `#E
 | --- | --- |
 | `⌘F` | Focus the PR filter (Esc returns to the list) |
 | `⌘R` | Reload pull requests |
-| `⌘2` | Toggle the diff panel |
+| `⌘2` | Expand or collapse the review section |
 
 ## Where it lives
 

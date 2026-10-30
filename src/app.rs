@@ -30,7 +30,6 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -39,9 +38,6 @@ const CONTEXT: &str = "Diffy";
 /// While the filter has focus, letter keys belong to the text field, so this
 /// context only keeps escape and the modifier shortcut for the sidebar.
 const FILTER_CONTEXT: &str = "DiffyFilter";
-/// The sliding diff panel owns this context while it has focus, so ⌘2 closes
-/// it again and Esc (bound in the sheet context) dismisses it.
-const PANEL_CONTEXT: &str = "DiffPanel";
 
 /// Panel widths the window opens with, and the bounds each panel's resize
 /// handle clamps the dragged width to.
@@ -68,6 +64,14 @@ enum PanelKind {
     Prs,
 }
 
+/// A main-panel section that can be expanded to the full panel size, hiding
+/// the rest (the PR description included), until it is collapsed again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExpandedSection {
+    Diff,
+    Review,
+}
+
 /// The payload a panel's resize handle drags with. The width itself is
 /// recomputed from the pointer position on every move, so the payload only
 /// says which panel the drag resizes.
@@ -82,19 +86,18 @@ impl Render for PanelResize {
 
 actions!(
     diffy,
-    [RefreshPrs, FocusFilter, LeaveFilter, ToggleDiffPanel]
+    [RefreshPrs, FocusFilter, LeaveFilter, ToggleReviewSection]
 );
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-f", FocusFilter, Some(CONTEXT)),
         KeyBinding::new("cmd-r", RefreshPrs, Some(CONTEXT)),
-        KeyBinding::new("cmd-2", ToggleDiffPanel, Some(CONTEXT)),
+        KeyBinding::new("cmd-2", ToggleReviewSection, Some(CONTEXT)),
         KeyBinding::new("escape", LeaveFilter, Some(FILTER_CONTEXT)),
         KeyBinding::new("cmd-r", RefreshPrs, Some(FILTER_CONTEXT)),
-        KeyBinding::new("cmd-2", ToggleDiffPanel, Some(FILTER_CONTEXT)),
-        KeyBinding::new("cmd-2", ToggleDiffPanel, Some(PANEL_CONTEXT)),
-        KeyBinding::new("cmd-2", ToggleDiffPanel, Some("Diff")),
+        KeyBinding::new("cmd-2", ToggleReviewSection, Some(FILTER_CONTEXT)),
+        KeyBinding::new("cmd-2", ToggleReviewSection, Some("Diff")),
     ]);
 }
 
@@ -104,7 +107,7 @@ enum Incoming {
     Ask(AskEvent),
 }
 
-/// What the diff panel knows about the selected PR's patch.
+/// What the main panel's diff section knows about the selected PR's patch.
 enum DiffView {
     /// The request the panel is waiting for, so a fetch that a refresh or a
     /// retry replaced cannot install an older patch.
@@ -139,8 +142,9 @@ pub struct Diffy {
     loading: bool,
     posting: Option<ReviewAction>,
     notice: Option<Notice>,
-    /// Whether the read-only diff panel slides in from the right.
-    diff_panel_open: bool,
+    /// The main-panel section currently expanded to full size; `None` is the
+    /// compact view (description on top, diff below, review as a strip).
+    expanded: Option<ExpandedSection>,
     /// Width of the repositories panel; the handle on its right edge drags
     /// it between `REPOS_MIN_WIDTH` and `REPOS_MAX_WIDTH`.
     repos_panel_width: Pixels,
@@ -150,9 +154,6 @@ pub struct Diffy {
     /// Set while a panel's resize handle is being dragged, so the widths are
     /// persisted once when the drag ends instead of on every move.
     panel_dragging: bool,
-    /// The diff line under the pointer in the panel. Sticky, so the "Ask to
-    /// agent" button stays reachable when the pointer moves onto it.
-    hovered: Option<DiffLinePosition>,
     /// Fetched patches, keyed by PR url and dropped on every refresh.
     diffs: HashMap<String, DiffView>,
     /// Counter behind the identity of each diff request.
@@ -226,11 +227,10 @@ impl Diffy {
             loading: false,
             posting: None,
             notice: None,
-            diff_panel_open: false,
+            expanded: None,
             repos_panel_width: REPOS_DEFAULT_WIDTH,
             prs_panel_width: PRS_DEFAULT_WIDTH,
             panel_dragging: false,
-            hovered: None,
             diffs: HashMap::new(),
             diff_requests: 0,
             asks: HashMap::new(),
@@ -299,7 +299,6 @@ impl Diffy {
                         // fetched earlier is reused after a refresh.
                         this.diffs.clear();
                         this.asks.clear();
-                        this.hovered = None;
                         this.state.set_prs(prs);
                         this.notice = Some(Notice {
                             text: "Updated just now".to_string(),
@@ -333,6 +332,9 @@ impl Diffy {
             text: format!("Reviewing {target}…"),
             tone: Tone::Info,
         });
+        // The review lives in its own section of the main panel, so expand it
+        // to show the run.
+        self.expanded = Some(ExpandedSection::Review);
         cx.notify();
 
         let events = self.events.clone();
@@ -407,27 +409,35 @@ impl Diffy {
         self.reset_selection_view(cx);
     }
 
-    /// Everything that follows a selection change, including the patch of the
-    /// PR the diff panel now shows when it is open.
+    /// Everything that follows a selection change, including the patch the
+    /// main panel now shows inline.
     fn reset_selection_view(&mut self, cx: &mut Context<Self>) {
         self.reset_detail_scroll();
-        self.hovered = None;
         if let Some(row) = self.state.selected_row() {
             self.list_scroll.scroll_to_item(row);
         }
-        if self.diff_panel_open {
-            self.load_diff(cx);
-        }
+        self.load_diff(cx);
         cx.notify();
     }
 
-    fn on_toggle_diff_panel(
+    fn on_toggle_review_section(
         &mut self,
-        _: &ToggleDiffPanel,
-        window: &mut Window,
+        _: &ToggleReviewSection,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toggle_diff_panel(window, cx);
+        self.toggle_section(ExpandedSection::Review, cx);
+    }
+
+    /// Expands a main-panel section to full size, or collapses it back to the
+    /// compact view when it is the expanded one.
+    fn toggle_section(&mut self, section: ExpandedSection, cx: &mut Context<Self>) {
+        self.expanded = if self.expanded == Some(section) {
+            None
+        } else {
+            Some(section)
+        };
+        cx.notify();
     }
 
     /// Writes the panel widths to `settings.json` so the next launch opens
@@ -563,227 +573,41 @@ impl Diffy {
         });
     }
 
-    /// One command behind the header button and ⌘2: the panel slides in from
-    /// the right when closed, and slides away when open.
-    fn toggle_diff_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_sheet(cx) {
-            self.close_diff_panel(window, cx);
-        } else {
-            if self.state.selected_pr().is_none() {
-                self.set_error("Select a pull request first.");
-                cx.notify();
-                return;
-            }
-            self.open_diff_panel(window, cx);
-        }
-    }
-
-    fn close_diff_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.diff_panel_open = false;
-        self.hovered = None;
-        window.close_sheet(cx);
-        cx.notify();
-    }
-
-    /// Opens the selected PR's diff in a sliding right panel, read-only. The
-    /// sheet builder re-runs whenever the window redraws and reads the view
-    /// through a weak handle, so the panel always shows the current PR, patch,
-    /// and ask tasks.
-    fn open_diff_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.diff_panel_open {
-            return;
-        }
-        self.diff_panel_open = true;
-        self.load_diff(cx);
-        let weak = cx.entity().downgrade();
-        let close_weak = weak.clone();
-        let panel_focus = cx.focus_handle();
-        let initial_focus = Cell::new(true);
-        window.open_sheet(cx, move |sheet, window, cx| {
-            let Some(this) = weak.upgrade() else {
-                return sheet;
-            };
-            // Focus the panel body once per opening, so ⌘2 and Esc work while
-            // the panel is open; later rebuilds must not steal the focus.
-            if initial_focus.replace(false) {
-                window.focus(&panel_focus, cx);
-            }
-            let title = this.read(cx).panel_title(cx);
-            let body = this.read(cx).panel_body(&weak, &panel_focus, cx);
-            // The panel never grows wider than the main panel it slides over;
-            // the builder re-runs on every redraw, so the cap follows window
-            // resizes and side-panel drags.
-            let max_width = this.read(cx).main_panel_width(window);
-            let close_weak = close_weak.clone();
-            sheet
-                .title(title)
-                .size(DefiniteLength::Fraction(0.62))
-                .max_w(max_width)
-                .p_0()
-                // No dimming overlay: the panel slides in beside the review,
-                // which stays clickable, so selecting another PR swaps the
-                // patch the panel shows.
-                .overlay(false)
-                .on_close(move |_, _, cx| {
-                    let _ = close_weak.update(cx, |this, cx| {
-                        this.diff_panel_open = false;
-                        this.hovered = None;
-                        cx.notify();
-                    });
-                })
-                .child(body)
-        });
-        cx.notify();
-    }
-
-    /// The width of the main panel (the review): the window's content width
-    /// minus the two side panels. The diff panel caps at this width.
-    fn main_panel_width(&self, window: &Window) -> Pixels {
-        window.viewport_size().width - self.repos_panel_width - self.prs_panel_width
-    }
-
-    /// The sheet title: what the panel shows, that it is read-only, and how
-    /// many files the patch has.
-    fn panel_title(&self, cx: &App) -> impl IntoElement {
-        let files = self
-            .state
-            .selected_pr()
-            .and_then(|pr| match self.diffs.get(&pr.url) {
-                Some(DiffView::Ready { files, .. }) => {
-                    Some(format!("{files} file{}", plural(*files)))
-                }
-                _ => None,
-            });
-        h_flex()
-            .gap_2()
-            .items_center()
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Diff"),
-            )
-            .child(Tag::new().small().child("Read-only"))
-            .child(div().flex_1())
-            .when_some(files, |this, files| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(files),
-                )
-            })
-    }
-
-    /// The sheet body: the PR identity and a hint, then the diff viewer with
-    /// its per-line ask affordance and the task cards. The body owns the panel
-    /// focus so the ⌘2 binding keeps working while the panel is open.
-    fn panel_body(
-        &self,
-        weak: &WeakEntity<Diffy>,
-        panel_focus: &FocusHandle,
-        cx: &App,
-    ) -> AnyElement {
-        let Some(pr) = self.state.selected_pr().cloned() else {
-            return v_flex().size_full().into_any_element();
-        };
-        let target = format!("{}#{}", pr.repo_name(), pr.number);
-        let body = match self.diffs.get(&pr.url) {
-            Some(DiffView::Ready { state, .. }) => self.diff_ready(&pr, state.clone(), weak, cx),
-            Some(DiffView::Failed(error)) => self.diff_failed(error.clone(), weak, cx),
-            Some(DiffView::Loading(_)) | None => v_flex()
-                .flex_1()
-                .min_h_0()
-                .justify_center()
-                .items_center()
-                .gap_3()
-                .child(Spinner::new().large())
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Loading the diff…"),
-                )
-                .into_any_element(),
-        };
-        let action_weak = weak.clone();
-        let ask_weak = weak.clone();
-        let ask_target = self.hovered.clone();
-        v_flex()
-            .id("diff-panel")
-            .track_focus(panel_focus)
-            .key_context(PANEL_CONTEXT)
-            .on_action(move |_: &ToggleDiffPanel, window, cx| {
-                let weak = action_weak.clone();
-                let _ = weak.update(cx, |this, cx| this.close_diff_panel(window, cx));
-            })
-            .size_full()
-            .child(
-                v_flex()
-                    .flex_shrink_0()
-                    .px_4()
-                    .pt_3()
-                    .pb_2()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(target),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(pr.title.clone()),
-                            )
-                            // The keyboard-reachable ask trigger; it acts on the
-                            // hovered line and costs no per-line space.
-                            .child(
-                                Button::new("ask-hovered-line")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::Bot)
-                                    .label("Ask to agent…")
-                                    .tooltip(match &ask_target {
-                                        Some(pos) => format!(
-                                            "Ask Claude about {}:{} in a read-only session",
-                                            pos.path(),
-                                            pos.line()
-                                        ),
-                                        None => "Hover a diff line first".to_string(),
-                                    })
-                                    .disabled(ask_target.is_none())
-                                    .on_click(move |_, window, cx| {
-                                        let weak = ask_weak.clone();
-                                        let _ = weak.update(cx, |this, cx| {
-                                            if let Some(pos) = this.hovered.clone() {
-                                                this.open_ask_dialog(pos, window, cx);
-                                            }
-                                        });
-                                    }),
-                            ),
-                    )
+    /// The review's status line for the section strip: the verdict tag of a
+    /// finished review, or the running stage.
+    fn review_status_chip(&self, pr: &PullRequest, cx: &App) -> Option<impl IntoElement> {
+        let status = self.state.shown_status(pr)?;
+        match status {
+            ReviewStatus::Running(stage) => Some(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .child(Spinner::new().small().color(cx.theme().warning))
                     .child(
                         div()
                             .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Hover a line and click + to ask about it. The session is read-only: it cannot touch this PR."),
-                    ),
-            )
-            .child(body)
-            .into_any_element()
+                            .text_color(cx.theme().warning)
+                            .child(stage.label().to_string()),
+                    )
+                    .into_any_element(),
+            ),
+            ReviewStatus::Done { report, .. } => {
+                let tag = match report.verdict {
+                    Verdict::Merge => Tag::success().small().child(verdict_label(report.verdict)),
+                    Verdict::RequestChanges => {
+                        Tag::danger().small().child(verdict_label(report.verdict))
+                    }
+                };
+                Some(tag.into_any_element())
+            }
+            ReviewStatus::Failed(_) => {
+                Some(Tag::danger().small().child("Failed").into_any_element())
+            }
+        }
     }
 
-    /// The read-only, syntax-highlighted diff inside the panel, with the ask
-    /// button under the hovered line and a card under every line with tasks.
+    /// The read-only, syntax-highlighted diff in the main panel, with the
+    /// per-line "+" ask trigger and a card under every line with tasks.
     fn diff_ready(
         &self,
         pr: &PullRequest,
@@ -792,7 +616,6 @@ impl Diffy {
         _cx: &App,
     ) -> AnyElement {
         let annotations = self.ask_annotations(pr);
-        let hover_weak = weak.clone();
         let annot_weak = weak.clone();
         let add_weak = weak.clone();
         div()
@@ -818,20 +641,6 @@ impl Diffy {
                         let weak = add_weak.clone();
                         let _ =
                             weak.update(cx, |this, cx| this.open_ask_dialog(position, window, cx));
-                    })
-                    .on_line_hover(move |pos, _, cx| {
-                        // Sticky: ignore the pointer leaving a line, so the
-                        // header's ask button keeps its target.
-                        if let Some(pos) = pos {
-                            let pos = pos.clone();
-                            let weak = hover_weak.clone();
-                            let _ = weak.update(cx, |this, cx| {
-                                if this.hovered.as_ref() != Some(&pos) {
-                                    this.hovered = Some(pos);
-                                    cx.notify();
-                                }
-                            });
-                        }
                     }),
             )
             .into_any_element()
@@ -1115,13 +924,17 @@ impl Diffy {
         cx.notify();
     }
 
-    /// Fetches the patch the first time the diff panel shows this PR; the
-    /// result is kept by PR url until the next refresh.
+    /// Fetches the patch of the selected PR the first time the main panel
+    /// shows it; the result is kept by PR url until the next refresh.
     fn load_diff(&mut self, cx: &mut Context<Self>) {
         let Some(pr) = self.state.selected_pr().cloned() else {
             return;
         };
         if self.diffs.contains_key(&pr.url) {
+            return;
+        }
+        // Tests seed patches through `set_diff` and never run `gh`.
+        if cfg!(test) {
             return;
         }
         self.diff_requests += 1;
@@ -1806,27 +1619,209 @@ impl Diffy {
             .min_w_0()
             .min_h_0()
             .child(self.detail_header(&pr, history_len, cx))
-            .child(self.review_body(&pr, cx))
+            .child(self.detail_body(&pr, cx))
     }
 
-    fn review_body(&mut self, pr: &PullRequest, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .id("review-scroll")
-            .flex_1()
-            .min_h_0()
-            .track_scroll(&self.detail_scroll)
-            .overflow_y_scrollbar()
+    /// The main panel's body. In the compact view the description fills the
+    /// panel and the diff and review are collapsed strips showing only their
+    /// headers. Expanding a section gives it the full body and hides
+    /// everything else, until it is collapsed again.
+    fn detail_body(&mut self, pr: &PullRequest, cx: &mut Context<Self>) -> AnyElement {
+        match self.expanded {
+            Some(ExpandedSection::Diff) => v_flex()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .child(self.diff_section(pr, true, cx))
+                .into_any_element(),
+            Some(ExpandedSection::Review) => v_flex()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .child(self.review_section(pr, true, cx))
+                .into_any_element(),
+            None => v_flex()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .child(
+                    div()
+                        .id("description-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .track_scroll(&self.detail_scroll)
+                        .overflow_y_scrollbar()
+                        .child(
+                            v_flex()
+                                .id("description-content")
+                                .test_support()
+                                .px_6()
+                                .py_4()
+                                .child(self.description(pr, cx)),
+                        ),
+                )
+                .child(self.diff_section(pr, false, cx))
+                .child(self.review_section(pr, false, cx))
+                .into_any_element(),
+        }
+    }
+
+    /// The diff section of the main panel. Collapsed, it is only its header
+    /// row (collapse toggle and file count); expanded, it takes the full
+    /// panel and shows the read-only viewer with its per-line "+" ask
+    /// affordance and the task cards.
+    fn diff_section(
+        &mut self,
+        pr: &PullRequest,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let weak = cx.entity().downgrade();
+        let files = match self.diffs.get(&pr.url) {
+            Some(DiffView::Ready { files, .. }) => {
+                Some(format!("{} file{}", files, plural(*files)))
+            }
+            _ => None,
+        };
+        let mut section = v_flex()
+            .id("diff-section")
+            .test_support()
+            .min_w_0()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .when(expanded, |this| this.flex_1().min_h_0())
+            .when(!expanded, |this| this.flex_shrink_0())
             .child(
-                v_flex()
-                    .w_full()
-                    .max_w(rems(40.))
-                    .mx_auto()
-                    .p_6()
-                    .gap_6()
-                    .child(self.review(pr, cx))
-                    .child(self.description(pr, cx)),
-            )
-            .into_any_element()
+                h_flex()
+                    .px_6()
+                    .pt_3()
+                    .pb_2()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new("toggle-diff-section")
+                            .ghost()
+                            .small()
+                            .icon(if expanded {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .label("Diff")
+                            .tooltip(if expanded {
+                                "Collapse the diff back to the compact view"
+                            } else {
+                                "Expand the diff to the full panel"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_section(ExpandedSection::Diff, cx)
+                            })),
+                    )
+                    .when_some(files, |this, files| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(files),
+                        )
+                    })
+                    .child(div().flex_1()),
+            );
+        if expanded {
+            let body = match self.diffs.get(&pr.url) {
+                Some(DiffView::Ready { state, .. }) => {
+                    self.diff_ready(pr, state.clone(), &weak, cx)
+                }
+                Some(DiffView::Failed(error)) => self.diff_failed(error.clone(), &weak, cx),
+                Some(DiffView::Loading(_)) | None => v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .justify_center()
+                    .items_center()
+                    .gap_3()
+                    .child(Spinner::new().large())
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Loading the diff…"),
+                    )
+                    .into_any_element(),
+            };
+            section = section.child(body);
+        }
+        section.into_any_element()
+    }
+
+    /// The review section of the main panel. It always shows a strip with the
+    /// collapse toggle and the review's status; expanded, it takes the full
+    /// panel on a background one tone off the ground, so the cut from the PR
+    /// description and diff is visible.
+    fn review_section(
+        &mut self,
+        pr: &PullRequest,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let weak = cx.entity().downgrade();
+        let mut section = v_flex()
+            .id("review-section")
+            .test_support()
+            .min_w_0()
+            .bg(cx.theme().sidebar)
+            .border_t_1()
+            .border_color(cx.theme().sidebar_border)
+            .when(expanded, |this| this.flex_1().min_h_0())
+            .when(!expanded, |this| this.flex_shrink_0())
+            .child(
+                h_flex()
+                    .px_6()
+                    .pt_3()
+                    .pb_2()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new("toggle-review-section")
+                            .ghost()
+                            .small()
+                            .icon(if expanded {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .label("Review")
+                            .tooltip(if expanded {
+                                "Collapse the review back to the compact view"
+                            } else {
+                                "Expand the review to the full panel (⌘2)"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_section(ExpandedSection::Review, cx)
+                            })),
+                    )
+                    .when_some(self.review_status_chip(pr, cx), |this, chip| {
+                        this.child(chip)
+                    })
+                    .child(div().flex_1()),
+            );
+        if expanded {
+            section = section.child(
+                div()
+                    .id("review-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(rems(40.))
+                            .mx_auto()
+                            .p_6()
+                            .child(self.review(pr, &weak, cx)),
+                    ),
+            );
+        }
+        section.into_any_element()
     }
 
     /// The panel's failure state for a patch that could not be loaded.
@@ -1965,9 +1960,9 @@ impl Diffy {
         let done = matches!(shown, Some(ReviewStatus::Done { .. }));
         let stale = self.review_is_stale(pr);
         let busy = self.posting.is_some();
-        let mut header = v_flex().gap_3();
 
-        let mut meta = vec![format!("by {}", author_name(pr))];
+        let mut meta = vec![format!("#{} · {}", pr.number, pr.repo_name())];
+        meta.push(format!("by {}", author_name(pr)));
         if let Some(updated) = time::parse_utc(&pr.updated_at) {
             meta.push(format!("updated {}", time::ago(updated, time::now())));
         }
@@ -1979,156 +1974,116 @@ impl Diffy {
             ));
         }
 
-        header = header.child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!("#{} · {}", pr.number, pr.repo_name())),
-                )
-                .child(div().flex_1())
-                .child(
-                    Link::new(ElementId::Name(format!("open-{}", pr.url).into()))
-                        .href(pr.url.clone())
-                        .text_xs()
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(Icon::new(IconName::ExternalLink).small())
-                                .child("Open on GitHub"),
-                        ),
-                ),
-        );
-
-        header = header.child(
-            h_flex()
-                .gap_3()
-                .items_start()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_2xl()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(pr.title.clone()),
-                )
-                .when(pr.by_me, |this| this.child(Tag::new().child("Yours"))),
-        );
-
-        header = header.child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(meta.join(" · ")),
-        );
-
-        header = header.child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(
-                    Button::new("run-review")
-                        .label(if running {
-                            "Reviewing…"
-                        } else if history_len > 0 {
-                            "Run review again"
-                        } else {
-                            "Run review"
-                        })
-                        .icon(IconName::Play)
-                        // Running is the main action until a review exists; once a
-                        // review is ready, posting it is what the reader came for.
-                        .when(!running && (!done || stale), |this| this.primary())
-                        .when(!running && done && !stale, |this| this.outline())
-                        .tooltip("Run the reviewer council")
-                        .loading(running)
-                        .disabled(running)
-                        .on_click(cx.listener(|this, _, _, cx| this.run_review(cx))),
-                )
-                .child(
-                    Button::new("toggle-diff-panel")
-                        .label(if self.diff_panel_open {
-                            "Hide diff"
-                        } else {
-                            "Diff"
-                        })
-                        .icon(if self.diff_panel_open {
-                            IconName::PanelRightClose
-                        } else {
-                            IconName::PanelRightOpen
-                        })
-                        .outline()
-                        .tooltip("Show the PR diff in a side panel, read-only (⌘2)")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.toggle_diff_panel(window, cx)),
-                        ),
-                )
-                .when(!running && done, |this| {
-                    this.child(div().flex_1())
-                        .child(
-                            Button::new("post-comment")
-                                .label("Comment")
-                                .outline()
-                                .disabled(busy)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.confirm_post(ReviewAction::Comment, window, cx)
-                                })),
-                        )
-                        // GitHub refuses an approval or a change request on your
-                        // own PR, so only the comment is offered there.
-                        .when(!pr.by_me, |this| {
-                            this.child(
-                                Button::new("post-changes")
-                                    .label("Request changes")
-                                    .danger()
-                                    .disabled(busy)
-                                    .loading(self.posting == Some(ReviewAction::RequestChanges))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.confirm_post(ReviewAction::RequestChanges, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("post-approve")
-                                    .label("Approve")
-                                    .success()
-                                    .disabled(busy)
-                                    .loading(self.posting == Some(ReviewAction::Approve))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.confirm_post(ReviewAction::Approve, window, cx)
-                                    })),
-                            )
-                        })
-                        .when(pr.by_me, |this| {
-                            this.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(
-                                        "GitHub only accepts comments on your own pull requests.",
-                                    ),
-                            )
-                        })
-                }),
-        );
-
         v_flex()
             .flex_shrink_0()
             .px_6()
-            .pt_2()
-            .pb_6()
+            .pt_3()
+            .pb_4()
+            .gap_2()
             .bg(cx.theme().sidebar)
             .border_b_1()
             .border_color(cx.theme().sidebar_border)
             .child(
-                v_flex()
-                    .w_full()
-                    .max_w(rems(40.))
-                    .mx_auto()
-                    .gap_3()
-                    .child(header),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xl()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .line_clamp(2)
+                            .child(pr.title.clone()),
+                    )
+                    .when(pr.by_me, |this| this.child(Tag::new().child("Yours")))
+                    .child(
+                        Link::new(ElementId::Name(format!("open-{}", pr.url).into()))
+                            .href(pr.url.clone())
+                            .text_xs()
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(Icon::new(IconName::ExternalLink).small())
+                                    .child("Open on GitHub"),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(meta.join(" · ")),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new("run-review")
+                            .label(if running {
+                                "Reviewing…"
+                            } else if history_len > 0 {
+                                "Run review again"
+                            } else {
+                                "Run review"
+                            })
+                            .icon(IconName::Play)
+                            // Running is the main action until a review exists; once a
+                            // review is ready, posting it is what the reader came for.
+                            .when(!running && (!done || stale), |this| this.primary())
+                            .when(!running && done && !stale, |this| this.outline())
+                            .tooltip("Run the reviewer council")
+                            .loading(running)
+                            .disabled(running)
+                            .on_click(cx.listener(|this, _, _, cx| this.run_review(cx))),
+                    )
+                    .when(!running && done, |this| {
+                        this.child(div().flex_1())
+                            .child(
+                                Button::new("post-comment")
+                                    .label("Comment")
+                                    .outline()
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.confirm_post(ReviewAction::Comment, window, cx)
+                                    })),
+                            )
+                            // GitHub refuses an approval or a change request on your
+                            // own PR, so only the comment is offered there.
+                            .when(!pr.by_me, |this| {
+                                this.child(
+                                    Button::new("post-changes")
+                                        .label("Request changes")
+                                        .danger()
+                                        .disabled(busy)
+                                        .loading(self.posting == Some(ReviewAction::RequestChanges))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.confirm_post(ReviewAction::RequestChanges, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("post-approve")
+                                        .label("Approve")
+                                        .success()
+                                        .disabled(busy)
+                                        .loading(self.posting == Some(ReviewAction::Approve))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.confirm_post(ReviewAction::Approve, window, cx)
+                                        })),
+                                )
+                            })
+                            .when(pr.by_me, |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(
+                                            "GitHub only accepts comments on your own pull requests.",
+                                        ),
+                                )
+                            })
+                    }),
             )
     }
 
@@ -2150,8 +2105,8 @@ impl Diffy {
             )
     }
 
-    fn review(&mut self, pr: &PullRequest, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut section = v_flex().gap_3().child(section_title("Review", cx));
+    fn review(&self, pr: &PullRequest, weak: &WeakEntity<Diffy>, cx: &App) -> impl IntoElement {
+        let mut section = v_flex().gap_3();
         match self.state.shown_status(pr).cloned() {
             None => {
                 section = section
@@ -2257,18 +2212,19 @@ impl Diffy {
                 report,
                 reviewed_at,
             }) => {
-                section = section.child(self.report(&report, reviewed_at, pr, cx));
+                section = section.child(self.report(&report, reviewed_at, pr, weak, cx));
             }
         }
         section
     }
 
     fn report(
-        &mut self,
+        &self,
         report: &ReviewReport,
         reviewed_at: u64,
         pr: &PullRequest,
-        cx: &mut Context<Self>,
+        weak: &WeakEntity<Diffy>,
+        cx: &App,
     ) -> impl IntoElement {
         let history_len = self.state.review_history(pr).len();
         let offset = self.state.review_offset;
@@ -2321,6 +2277,8 @@ impl Diffy {
                             )
                             .child(div().flex_1())
                             .when(history_len > 1, |this| {
+                                let older_weak = weak.clone();
+                                let newer_weak = weak.clone();
                                 this.child(
                                     div()
                                         .text_xs()
@@ -2334,11 +2292,14 @@ impl Diffy {
                                         .icon(IconName::ChevronLeft)
                                         .tooltip("Older review")
                                         .disabled(offset + 1 >= history_len)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.state.older_review();
-                                            this.reset_detail_scroll();
-                                            cx.notify();
-                                        })),
+                                        .on_click(move |_, _, cx| {
+                                            let weak = older_weak.clone();
+                                            let _ = weak.update(cx, |this, cx| {
+                                                this.state.older_review();
+                                                this.reset_detail_scroll();
+                                                cx.notify();
+                                            });
+                                        }),
                                 )
                                 .child(
                                     Button::new("newer-review")
@@ -2347,11 +2308,14 @@ impl Diffy {
                                         .icon(IconName::ChevronRight)
                                         .tooltip("Newer review")
                                         .disabled(offset == 0)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.state.newer_review();
-                                            this.reset_detail_scroll();
-                                            cx.notify();
-                                        })),
+                                        .on_click(move |_, _, cx| {
+                                            let weak = newer_weak.clone();
+                                            let _ = weak.update(cx, |this, cx| {
+                                                this.state.newer_review();
+                                                this.reset_detail_scroll();
+                                                cx.notify();
+                                            });
+                                        }),
                                 )
                             }),
                     )
@@ -2457,7 +2421,7 @@ impl Diffy {
     }
 
     fn status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let hints = "⌘2 diff panel · ⌘F filter · ⌘R refresh";
+        let hints = "⌘2 review · ⌘F filter · ⌘R refresh";
         let position = self
             .state
             .prs
@@ -2520,7 +2484,7 @@ impl Render for Diffy {
             .on_action(cx.listener(Self::on_focus_filter))
             .on_action(cx.listener(Self::on_leave_filter))
             .on_action(cx.listener(Self::on_input_escape))
-            .on_action(cx.listener(Self::on_toggle_diff_panel))
+            .on_action(cx.listener(Self::on_toggle_review_section))
             // Any mouse up ends a handle drag; the listener persists the
             // dragged width only when one was in progress.
             .capture_any_mouse_up(cx.listener(Self::on_any_mouse_up))
@@ -2551,8 +2515,8 @@ fn diff_side(side: AskSide) -> DiffSide {
     }
 }
 
-/// Renders one annotation inside the diff panel: the task card for a
-/// `task-{id}` line.
+/// Renders one annotation inside the diff: the task card for a `task-{id}`
+/// line.
 fn render_panel_annotation(
     weak: &WeakEntity<Diffy>,
     annotation: &DiffAnnotation,
@@ -2843,12 +2807,11 @@ fn plural(count: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiffView, Diffy, PRS_DEFAULT_WIDTH, PRS_MAX_WIDTH, REPOS_DEFAULT_WIDTH, REPOS_MIN_WIDTH,
-        bind_keys,
+        DiffView, Diffy, ExpandedSection, PRS_DEFAULT_WIDTH, PRS_MAX_WIDTH, REPOS_DEFAULT_WIDTH,
+        REPOS_MIN_WIDTH, bind_keys,
     };
     use crate::ask::{AskEvent, AskSide, AskStatus, AskTask};
     use crate::models::{Author, PullRequest, Repository};
-    use gpui_kit::component::WindowExt as _;
     use gpui_kit::component::diff::{DiffFile, DiffLinePosition, DiffSide};
     use gpui_kit::test::{TestQueryExt, TestWindowExt};
     use gpui_kit::{
@@ -3026,15 +2989,48 @@ mod tests {
         });
     }
 
+    /// The bounds of the element carrying `id`, if it is in the frame.
+    fn element_bounds(window: &gpui_kit::Window, id: &str) -> Option<Bounds<gpui_kit::Pixels>> {
+        window
+            .elements()
+            .into_iter()
+            .find(|element| element.path().last() == Some(&gpui_kit::ElementId::Name(id.into())))
+            .map(|element| element.bounds())
+    }
+
     #[gpui_kit::test]
-    fn the_diff_shortcut_opens_the_sliding_panel_and_escape_closes_it(cx: &mut TestAppContext) {
+    fn cmd_2_expands_the_review_section_to_full_size(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(bind_keys);
         let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
         cx.update(|cx| seed_patch(&view, cx));
 
+        // Compact view: the description fills the panel, and the diff and
+        // review are collapsed strips showing only their headers.
         cx.update_window(handle, |_, window, cx| {
             focus_window(&view, window, cx);
+            window.render_frame(cx);
+            assert!(
+                element_bounds(window, "description-content").is_some(),
+                "the description should be visible in the compact view"
+            );
+            for id in ["diff-section", "review-section"] {
+                let strip = element_bounds(window, id).expect("section strip");
+                assert!(
+                    strip.size.height < px(100.),
+                    "{id} should be a collapsed strip in the compact view, got {}px",
+                    f32::from(strip.size.height)
+                );
+            }
+            assert!(
+                window.find_all_by_role(Role::Document).is_empty(),
+                "the diff viewer should not render while the diff is collapsed"
+            );
+        })
+        .unwrap();
+
+        // ⌘2 expands the review to the full panel and hides the rest.
+        cx.update_window(handle, |_, window, cx| {
             window.press("cmd-2", cx);
             window.render_frame(cx);
         })
@@ -3042,7 +3038,7 @@ mod tests {
 
         cx.update(|cx| {
             let view = view.read(cx);
-            assert!(view.diff_panel_open, "⌘2 did not open the diff panel");
+            assert_eq!(view.expanded, Some(ExpandedSection::Review));
             assert!(
                 matches!(
                     view.diffs.get(PR_URL),
@@ -3053,107 +3049,128 @@ mod tests {
         });
 
         cx.update_window(handle, |_, window, cx| {
-            assert!(window.has_active_sheet(cx), "the sliding panel is not open");
+            window.render_frame(cx);
+            let review = element_bounds(window, "review-section").expect("review section");
+            assert!(
+                review.size.height > px(300.),
+                "the expanded review should fill the panel, got {}px",
+                f32::from(review.size.height)
+            );
+            assert!(
+                element_bounds(window, "description-content").is_none(),
+                "the description should be hidden while the review is expanded"
+            );
+            assert!(
+                element_bounds(window, "diff-section").is_none(),
+                "the diff should be hidden while the review is expanded"
+            );
+        })
+        .unwrap();
+
+        // ⌘2 again collapses back to the compact view.
+        cx.update_window(handle, |_, window, cx| {
+            window.press("cmd-2", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        cx.update(|cx| assert_eq!(view.read(cx).expanded, None));
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(element_bounds(window, "description-content").is_some());
+            assert!(element_bounds(window, "diff-section").is_some());
+        })
+        .unwrap();
+    }
+
+    /// The diff is collapsed by default (header only); expanding it gives it
+    /// the full panel with the viewer rendered, and hides the PR description
+    /// and the review strip until it is collapsed again.
+    #[gpui_kit::test]
+    fn the_diff_is_collapsed_by_default_and_expands_to_the_full_panel(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(bind_keys);
+        let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
+        cx.update(|cx| seed_patch(&view, cx));
+
+        cx.update_window(handle, |_, window, cx| {
+            focus_window(&view, window, cx);
+            window.render_frame(cx);
+            assert!(element_bounds(window, "description-content").is_some());
+            let strip = element_bounds(window, "diff-section").expect("diff strip");
+            assert!(
+                strip.size.height < px(100.),
+                "the diff should be collapsed to its header by default, got {}px",
+                f32::from(strip.size.height)
+            );
+        })
+        .unwrap();
+
+        // Click the diff section's toggle.
+        cx.update_window(handle, |_, window, cx| {
+            window.click("toggle-diff-section", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        cx.update(|cx| assert_eq!(view.read(cx).expanded, Some(ExpandedSection::Diff)));
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let diff = element_bounds(window, "diff-section").expect("diff section");
+            assert!(
+                diff.size.height > px(400.),
+                "the expanded diff should fill the panel, got {}px",
+                f32::from(diff.size.height)
+            );
             let docs = window.find_all_by_role(Role::Document);
-            let pane = docs
-                .first()
-                .expect("the diff viewer is not in the frame")
-                .bounds();
             assert!(
-                pane.size.height > px(200.),
-                "the diff pane collapsed to {}px",
-                f32::from(pane.size.height)
+                docs.iter().any(|doc| doc.bounds().size.height > px(150.)),
+                "the diff viewer should render when the section is expanded"
             );
-            window.press("escape", cx);
+            assert!(
+                element_bounds(window, "description-content").is_none(),
+                "the description should be hidden while the diff is expanded"
+            );
+            assert!(
+                element_bounds(window, "review-section").is_none(),
+                "the review strip should be hidden while the diff is expanded"
+            );
+        })
+        .unwrap();
+
+        // Clicking the toggle again collapses back to the compact view.
+        cx.update_window(handle, |_, window, cx| {
+            window.click("toggle-diff-section", cx);
             window.render_frame(cx);
         })
         .unwrap();
 
+        cx.update(|cx| assert_eq!(view.read(cx).expanded, None));
         cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(element_bounds(window, "description-content").is_some());
+            let strip = element_bounds(window, "diff-section").expect("diff strip");
             assert!(
-                !window.has_active_sheet(cx),
-                "escape did not close the panel"
+                strip.size.height < px(100.),
+                "the diff should be a header strip again after collapsing, got {}px",
+                f32::from(strip.size.height)
             );
         })
         .unwrap();
-        cx.update(|cx| assert!(!view.read(cx).diff_panel_open));
     }
 
-    /// The diff sheet caps at the main panel's current width: at 62% of the
-    /// 1100 px test window it would be 682 px wide, past the 660 px detail
-    /// panel (1100 - 200 repos - 240 prs), so the cap binds.
+    /// The per-line "+" ask trigger renders in the diff's line rows, and a
+    /// finished ask shows its answer as a task card on the same line.
     #[gpui_kit::test]
-    fn the_diff_panel_caps_its_width_at_the_main_panel_width(cx: &mut TestAppContext) {
-        // Keep the persisted settings out of the real ~/.diffy.
-        let home = std::env::temp_dir().join(format!("diffy-cap-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        unsafe { std::env::set_var("DIFFY_HOME", &home) };
-
+    fn the_per_line_plus_triggers_ask_and_tasks_render_answers(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(bind_keys);
         let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
         cx.update(|cx| seed_patch(&view, cx));
 
-        cx.update_window(handle, |_, window, cx| {
-            focus_window(&view, window, cx);
-            window.press("cmd-2", cx);
-            // A few frames, so the slide-in animation settles before the
-            // sheet's bounds are measured.
-            for _ in 0..10 {
-                window.render_frame(cx);
-            }
-        })
-        .unwrap();
-
-        cx.update_window(handle, |_, window, cx| {
-            assert!(window.has_active_sheet(cx), "the sliding panel is not open");
-            let main = px(1100.) - REPOS_DEFAULT_WIDTH - PRS_DEFAULT_WIDTH;
-            assert!(
-                main < px(1100.) * 0.62,
-                "the test window is too wide for the cap to bind"
-            );
-            let sheet = window
-                .elements()
-                .into_iter()
-                .find(|element| {
-                    element.path().last()
-                        == Some(&gpui_kit::ElementId::Name("sheet-content".into()))
-                })
-                .expect("the diff sheet is not in the frame");
-            let width = sheet.bounds().size.width;
-            assert_eq!(
-                width,
-                main,
-                "the sheet should cap at the {}px main panel",
-                f32::from(main),
-            );
-        })
-        .unwrap();
-
-        let _ = std::fs::remove_dir_all(&home);
-    }
-
-    /// Hovering a line surfaces the read-only "Ask to agent" action under it,
-    /// and a finished ask shows its answer as a task card on the same line.
-    #[gpui_kit::test]
-    fn hovering_a_line_shows_ask_to_agent_and_tasks_render_answers(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
-        cx.update(bind_keys);
-        let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
-        cx.update(|cx| seed_patch(&view, cx));
-
-        cx.update_window(handle, |_, window, cx| {
-            focus_window(&view, window, cx);
-            window.press("cmd-2", cx);
-            window.render_frame(cx);
-        })
-        .unwrap();
-
-        // Hover the added line, then finish a task on it.
+        // Finish a task on the added line.
         cx.update(|cx| {
             view.update(cx, |view, cx| {
-                view.hovered = Some(DiffLinePosition::new("src/main.rs", DiffSide::Modified, 2));
                 view.asks.insert(
                     PR_URL.to_string(),
                     vec![AskTask {
@@ -3178,15 +3195,18 @@ mod tests {
             });
         });
 
+        // Expand the diff section so its line rows render, then check the
+        // in-row "+" ask trigger.
         cx.update_window(handle, |_, window, cx| {
+            focus_window(&view, window, cx);
+            window.click("toggle-diff-section", cx);
             window.render_frame(cx);
             let buttons = window.find_all_by_role(Role::Button);
             let labels: Vec<Option<&str>> = buttons.iter().map(|b| b.label()).collect();
-            // The header ask trigger acts on the hovered line and takes no
-            // per-line space; the in-row "+" is the pointer path.
+            // The in-row "+" is the only ask trigger; it costs no header space.
             assert!(
-                labels.contains(&Some("Ask to agent…")),
-                "the ask button is missing from the panel header: {labels:?}"
+                !labels.contains(&Some("Ask to agent…")),
+                "the diff header should not carry an ask button: {labels:?}"
             );
             assert!(
                 labels
@@ -3194,11 +3214,6 @@ mod tests {
                     .any(|label| label.is_some_and(|l| l.starts_with("Add annotation to line"))),
                 "the per-line + ask trigger is missing: {labels:?}"
             );
-            let ask = buttons
-                .iter()
-                .find(|b| b.label() == Some("Ask to agent…"))
-                .expect("ask button");
-            assert_ne!(ask.disabled(), Some(true), "hovered line should enable ask");
         })
         .unwrap();
 
@@ -3219,9 +3234,9 @@ mod tests {
         });
     }
 
-    /// The panel quotes the hovered line's code from the stored patch.
+    /// The diff section quotes the hovered line's code from the stored patch.
     #[gpui_kit::test]
-    fn the_panel_reads_line_code_from_the_patch(cx: &mut TestAppContext) {
+    fn the_diff_section_reads_line_code_from_the_patch(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(bind_keys);
         let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
@@ -3244,12 +3259,11 @@ mod tests {
             );
         });
 
-        // Opening the panel does not hit the network: the seeded patch is kept.
+        // Rendering the main panel does not hit the network: the seeded patch
+        // is what the inline diff shows.
         cx.update_window(handle, |_, window, cx| {
             focus_window(&view, window, cx);
-            window.press("cmd-2", cx);
             window.render_frame(cx);
-            assert!(window.has_active_sheet(cx));
         })
         .unwrap();
         cx.update(|cx| {

@@ -4,10 +4,10 @@ Diffy is a desktop app for reviewing the pull requests that are waiting on **you
 It finds the open PRs where you (or your team) are requested as a reviewer, plus the open
 PRs you wrote yourself, groups them by repository, and runs a two-reviewer + judge AI review
 for the PR you select. Several PRs can be reviewed at the same time, each run is kept in that
-PR's review history so you can run it again after new commits and compare, you can slide the
-PR's diff in from the right as a read-only, syntax-highlighted panel and ask Claude about any
-line of it, and you can post a review to GitHub as an approval, a request for changes, or a
-comment.
+PR's review history so you can run it again after new commits and compare, the PR's diff is
+shown read-only and syntax-highlighted right in the review pane, where you can also ask
+Claude about any line of it, and you can post a review to GitHub as an approval, a request
+for changes, or a comment.
 
 The window has three panels — repositories, the selected repo's pull requests, and the
 review — and the two left panels resize by dragging their seams. The Settings button in the
@@ -90,24 +90,24 @@ that PR's latest review. A PR that changed after its newest review is marked **o
 so you know to run the review again before posting it. The footer shows the total pull
 requests and repositories, or the reviews running right now.
 
-The review pane has a fixed header with the PR title, author, age, comment count, a **Yours**
-tag on the PRs you wrote, a link to GitHub, the review actions, and a **Diff** button. The pane
-itself always shows the review, because that is what you opened the PR for: the verdict, the
-intent, the summary, the findings worst severity first, and the findings the judge filtered
-out. The PR description follows below as context.
+The review pane has a compact header — the PR title with a **Yours** tag on the PRs you
+wrote and a link to GitHub, a metadata line with the number, repo, author, age, and comment
+count, and the actions: **Run review**, and once a review exists **Comment**,
+**Request changes**, **Approve**. The body below is a stack of collapsible sections: by
+default the PR **description** fills the pane (scrolling on its own) and the **Diff** and
+**Review** are collapsed strips showing only their headers — the review strip shows the
+verdict or the running stage. The **Diff** and **Review** section headers expand their
+section to the full pane, hiding the description and the other section, until they are
+collapsed again. Expanded, the diff shows the PR's patch read-only and syntax-highlighted —
+every changed file, with its hunk headers, line numbers, and added and removed lines, in one
+virtualized list that scrolls on its own and expands folded context on click. The review
+section keeps a background one tone off the ground so the cut from the description and diff
+is visible. `⌘2` expands or collapses the review section. The patch is fetched the first time a PR is selected and kept
+per PR until the next refresh, so returning to a PR costs nothing. A failed fetch says why
+and offers **Try again**.
 
-**Diff** slides in from the right as a panel beside the review, which stays clickable: the
-PR's patch, read-only and syntax-highlighted — every changed file, with its hunk headers,
-line numbers, and added and removed lines, in one virtualized list that scrolls on its own and
-expands folded context on click. The panel is marked **Read-only** in its title, and it is
-resizable. Selecting another PR swaps the patch the panel shows. The patch is fetched the
-first time the panel opens for a PR and kept per PR until the next refresh, so returning to a
-PR costs nothing. A failed fetch says why and offers **Try again**. `Esc`, the panel's close
-button, or `⌘2` slides it away.
-
-Hovering a line shows a **+** inside the line row (like an inline review comment); clicking it,
-or the panel header's **Ask to agent…** button (which targets the hovered line), opens a dialog
-that names the line (`path:line`), shows the line's code, and takes your question. On **Ask**,
+Hovering a line shows a **+** inside the line row (like an inline review comment); clicking it
+opens a dialog that names the line (`path:line`), shows the line's code, and takes your question. On **Ask**,
 Diffy creates a task for that line and starts a headless Claude session that answers the
 question **in read-only mode**: the session is granted only the `Read`, `Glob`, and `Grep`
 tools — no `Bash` at all — so it cannot run `gh` or `git` and can never write to the PR, and
@@ -133,14 +133,14 @@ empty for the built-in format. Both are saved to `~/.diffy/settings.json`.
 
 | Key | Action |
 | --- | --- |
-| `⌘2` | Slide the diff panel in or away |
+| `⌘2` | Expand or collapse the review section |
 | `⌘F` | Focus the PR filter |
 | `⌘R` | Refresh the PR list from GitHub |
-| `Esc` | Leave the filter, or close the diff panel |
+| `Esc` | Leave the filter |
 
 Selection, running a review, stepping through review history, and submitting a review are
 done with the window controls: click a PR row, use the **Run review** button, the review
-history arrows, the **Diff** button, and the **Comment** / **Request changes** / **Approve**
+history arrows, the review section header, and the **Comment** / **Request changes** / **Approve**
 buttons.
 
 Posting uses the buttons in the review header: **Comment**, **Request changes**, and
@@ -150,9 +150,9 @@ and while no finished review is shown. On a PR you wrote, GitHub refuses an appr
 change request of your own work, so only **Comment** is offered there.
 
 With the mouse you can click a repository or a PR to select it, drag a seam between panels to
-resize it, scroll the PR list or the review pane, hover a diff line and use
-**Ask to agent…**, resize or close the diff panel, use the refresh button in the PR list
-header, and open Settings from the repositories panel.
+resize it, scroll the PR list or a section of the review pane, hover a diff line and click its
+**+**, expand or collapse the diff and review sections from their headers, use the
+refresh button in the PR list header, and open Settings from the repositories panel.
 
 The filter only hides rows of the selected repository. Every fetched PR stays loaded, so
 switching repositories or clearing the filter brings all of your pull requests back, and the
