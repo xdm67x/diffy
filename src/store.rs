@@ -27,6 +27,36 @@ pub struct Settings {
     /// Teams whose review requests count as yours, e.g. `["acme/backend"]`.
     #[serde(default)]
     pub teams: Vec<String>,
+    /// Color theme the window opens with.
+    #[serde(default)]
+    pub theme: ThemePref,
+    /// Template for the review comment posted to GitHub, with placeholders
+    /// like `{summary}` and `{findings}`. `None` uses the built-in format.
+    #[serde(default)]
+    pub comment_template: Option<String>,
+    /// Panel widths the window restores on launch.
+    #[serde(default)]
+    pub panels: PanelPrefs,
+}
+
+/// The color theme chosen in settings.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePref {
+    #[default]
+    Light,
+    Dark,
+}
+
+/// Persisted panel widths in px. Absent fields fall back to the defaults.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct PanelPrefs {
+    /// Width of the repositories panel.
+    #[serde(default)]
+    pub repos: Option<u32>,
+    /// Width of the pull request list panel.
+    #[serde(default)]
+    pub prs: Option<u32>,
 }
 
 pub fn settings() -> Result<Settings> {
@@ -38,6 +68,48 @@ pub fn settings() -> Result<Settings> {
         .wrap_err_with(|| format!("could not read settings at {}", path.display()))?;
     serde_json::from_str(&raw)
         .wrap_err_with(|| format!("could not parse settings at {}", path.display()))
+}
+
+/// Applies `edit` to the settings file, keeping every field it does not
+/// touch. A file that does not parse is left untouched rather than
+/// overwritten with defaults.
+fn update_settings(edit: impl FnOnce(&mut Settings)) -> Result<()> {
+    update_settings_in(&base_dir()?, edit)
+}
+
+fn update_settings_in(base: &Path, edit: impl FnOnce(&mut Settings)) -> Result<()> {
+    let path = base.join(SETTINGS_FILE);
+    let mut current = if path.exists() {
+        let raw = fs::read_to_string(&path)
+            .wrap_err_with(|| format!("could not read settings at {}", path.display()))?;
+        serde_json::from_str::<Settings>(&raw)
+            .wrap_err_with(|| format!("could not parse settings at {}", path.display()))?
+    } else {
+        Settings::default()
+    };
+    edit(&mut current);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .wrap_err_with(|| format!("could not create {}", parent.display()))?;
+    }
+    let raw = serde_json::to_string_pretty(&current)?;
+    fs::write(&path, raw)
+        .wrap_err_with(|| format!("could not write settings at {}", path.display()))
+}
+
+pub fn save_theme(theme: ThemePref) -> Result<()> {
+    update_settings(|settings| settings.theme = theme)
+}
+
+pub fn save_comment_template(template: Option<String>) -> Result<()> {
+    update_settings(|settings| settings.comment_template = template)
+}
+
+pub fn save_panels(repos: u32, prs: u32) -> Result<()> {
+    update_settings(|settings| {
+        settings.panels.repos = Some(repos);
+        settings.panels.prs = Some(prs);
+    })
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -159,6 +231,50 @@ mod tests {
     fn missing_reviews_file_is_empty() {
         let base = temp_base("missing");
         assert!(load_reviews_in(&base).unwrap().is_empty());
+    }
+
+    #[test]
+    fn settings_roundtrip_keeps_untouched_fields_and_skips_old_keys() {
+        let base = temp_base("settings");
+        fs::create_dir_all(&base).unwrap();
+        // An old settings file: teams plus keys this version no longer writes.
+        fs::write(
+            base.join(SETTINGS_FILE),
+            r#"{"teams": ["acme/backend"], "theme": "dark", "sidebar": {"width": 300, "collapsed": true}}"#,
+        )
+        .unwrap();
+
+        update_settings_in(&base, |s| {
+            s.theme = ThemePref::Light;
+            s.comment_template = Some("{verdict}: {summary}".to_string());
+            s.panels.repos = Some(180);
+            s.panels.prs = Some(260);
+        })
+        .unwrap();
+
+        let loaded: Settings =
+            serde_json::from_str(&fs::read_to_string(base.join(SETTINGS_FILE)).unwrap()).unwrap();
+        assert_eq!(loaded.teams, vec!["acme/backend".to_string()]);
+        assert_eq!(loaded.theme, ThemePref::Light);
+        assert_eq!(
+            loaded.comment_template.as_deref(),
+            Some("{verdict}: {summary}")
+        );
+        assert_eq!(loaded.panels.repos, Some(180));
+        assert_eq!(loaded.panels.prs, Some(260));
+
+        // A file with only teams still loads, with defaults for the rest.
+        let base2 = temp_base("settings-minimal");
+        fs::create_dir_all(&base2).unwrap();
+        fs::write(base2.join(SETTINGS_FILE), r#"{"teams": ["x"]}"#).unwrap();
+        let loaded: Settings =
+            serde_json::from_str(&fs::read_to_string(base2.join(SETTINGS_FILE)).unwrap()).unwrap();
+        assert_eq!(loaded.theme, ThemePref::Light);
+        assert_eq!(loaded.comment_template, None);
+        assert_eq!(loaded.panels.repos, None);
+
+        fs::remove_dir_all(&base).unwrap();
+        fs::remove_dir_all(&base2).unwrap();
     }
 
     #[test]

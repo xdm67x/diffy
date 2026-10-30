@@ -7,8 +7,9 @@ use crate::state::{ReviewStatus, Row, State};
 use crate::store;
 use crate::time;
 
+use gpui_kit::base::InteractiveElementExt as _;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt,
+    ActiveTheme, Disableable, Icon, IconName, IndexPath, Sizable, WindowExt,
     button::{Button, ButtonVariant, ButtonVariants},
     diff::{
         Diff, DiffAnnotation, DiffFile, DiffHoverHighlight, DiffLinePosition, DiffSide, DiffState,
@@ -17,7 +18,10 @@ use gpui_kit::component::{
     input::{Escape as InputEscape, Input, InputEvent, InputState, Textarea, TextareaState},
     link::Link,
     list::ListItem,
+    resizable::{HandleEdge, resize_handle},
     scroll::ScrollableElement,
+    searchable_list::SearchableVec,
+    select::{Select, SelectState},
     spinner::Spinner,
     status_bar::StatusBar,
     tag::Tag,
@@ -38,6 +42,43 @@ const FILTER_CONTEXT: &str = "DiffyFilter";
 /// The sliding diff panel owns this context while it has focus, so ⌘2 closes
 /// it again and Esc (bound in the sheet context) dismisses it.
 const PANEL_CONTEXT: &str = "DiffPanel";
+
+/// Panel widths the window opens with, and the bounds each panel's resize
+/// handle clamps the dragged width to.
+const REPOS_DEFAULT_WIDTH: Pixels = px(200.);
+const REPOS_MIN_WIDTH: Pixels = px(160.);
+const REPOS_MAX_WIDTH: Pixels = px(320.);
+const PRS_DEFAULT_WIDTH: Pixels = px(240.);
+const PRS_MIN_WIDTH: Pixels = px(208.);
+const PRS_MAX_WIDTH: Pixels = px(480.);
+
+/// Clamps a dragged panel width to its usable range.
+fn clamp_repos_width(width: Pixels) -> Pixels {
+    width.max(REPOS_MIN_WIDTH).min(REPOS_MAX_WIDTH)
+}
+
+fn clamp_prs_width(width: Pixels) -> Pixels {
+    width.max(PRS_MIN_WIDTH).min(PRS_MAX_WIDTH)
+}
+
+/// Which panel a resize handle belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelKind {
+    Repos,
+    Prs,
+}
+
+/// The payload a panel's resize handle drags with. The width itself is
+/// recomputed from the pointer position on every move, so the payload only
+/// says which panel the drag resizes.
+#[derive(Clone)]
+struct PanelResize(PanelKind);
+
+impl Render for PanelResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
 
 actions!(
     diffy,
@@ -100,6 +141,15 @@ pub struct Diffy {
     notice: Option<Notice>,
     /// Whether the read-only diff panel slides in from the right.
     diff_panel_open: bool,
+    /// Width of the repositories panel; the handle on its right edge drags
+    /// it between `REPOS_MIN_WIDTH` and `REPOS_MAX_WIDTH`.
+    repos_panel_width: Pixels,
+    /// Width of the PR list panel; the handle on its right edge drags it
+    /// between `PRS_MIN_WIDTH` and `PRS_MAX_WIDTH`.
+    prs_panel_width: Pixels,
+    /// Set while a panel's resize handle is being dragged, so the widths are
+    /// persisted once when the drag ends instead of on every move.
+    panel_dragging: bool,
     /// The diff line under the pointer in the panel. Sticky, so the "Ask to
     /// agent" button stays reachable when the pointer moves onto it.
     hovered: Option<DiffLinePosition>,
@@ -177,6 +227,9 @@ impl Diffy {
             posting: None,
             notice: None,
             diff_panel_open: false,
+            repos_panel_width: REPOS_DEFAULT_WIDTH,
+            prs_panel_width: PRS_DEFAULT_WIDTH,
+            panel_dragging: false,
             hovered: None,
             diffs: HashMap::new(),
             diff_requests: 0,
@@ -204,6 +257,21 @@ impl Diffy {
                     }))
             }
             Err(error) => this.set_error(format!("Could not load saved reviews: {error:#}")),
+        }
+        match store::settings() {
+            Ok(settings) => {
+                this.repos_panel_width = settings
+                    .panels
+                    .repos
+                    .map(|width| clamp_repos_width(px(width as f32)))
+                    .unwrap_or(REPOS_DEFAULT_WIDTH);
+                this.prs_panel_width = settings
+                    .panels
+                    .prs
+                    .map(|width| clamp_prs_width(px(width as f32)))
+                    .unwrap_or(PRS_DEFAULT_WIDTH);
+            }
+            Err(error) => this.set_error(format!("Could not load settings: {error:#}")),
         }
         this
     }
@@ -360,6 +428,139 @@ impl Diffy {
         cx: &mut Context<Self>,
     ) {
         self.toggle_diff_panel(window, cx);
+    }
+
+    /// Writes the panel widths to `settings.json` so the next launch opens
+    /// the window as it was left.
+    fn persist_panels(&self) {
+        let result = store::save_panels(
+            f32::from(self.repos_panel_width) as u32,
+            f32::from(self.prs_panel_width) as u32,
+        );
+        if let Err(error) = result {
+            log::error(format!("could not save panel settings: {error:#}"));
+        }
+    }
+
+    /// Follows a resize handle's drag: the repositories panel starts at the
+    /// window's left edge and the PR list right after it, so the pointer's x
+    /// inside the shell lands on the seam being dragged.
+    fn on_panel_drag_move(
+        &mut self,
+        event: &DragMoveEvent<PanelResize>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let x = event.event.position.x - event.bounds.origin.x;
+        match event.drag(cx).0 {
+            PanelKind::Repos => self.repos_panel_width = clamp_repos_width(x),
+            PanelKind::Prs => self.prs_panel_width = clamp_prs_width(x - self.repos_panel_width),
+        }
+        cx.notify();
+    }
+
+    /// Persists the dragged widths once the drag ends, not on every move.
+    fn on_any_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.panel_dragging {
+            self.panel_dragging = false;
+            self.persist_panels();
+            cx.notify();
+        }
+    }
+
+    /// The settings dialog: color theme and the template of the review
+    /// comment posted to GitHub. Saving applies the theme immediately.
+    fn open_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = store::settings().unwrap_or_default();
+        let theme_index = match settings.theme {
+            store::ThemePref::Light => 0,
+            store::ThemePref::Dark => 1,
+        };
+        let appearance = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(vec!["Light", "Dark"]),
+                Some(IndexPath::new(theme_index)),
+                window,
+                cx,
+            )
+        });
+        let template = cx.new(|cx| {
+            let mut state = TextareaState::new(window, cx);
+            if let Some(template) = &settings.comment_template {
+                state.set_value(template.clone(), window, cx);
+            }
+            state.set_auto_grow(6, 20, cx);
+            state
+        });
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let content_appearance = appearance.clone();
+            let content_template = template.clone();
+            let ok_appearance = appearance.clone();
+            let ok_template = template.clone();
+            dialog
+                .title("Settings")
+                .content(move |content, _, cx| {
+                    content.child(
+                        v_flex()
+                            .gap_4()
+                            .p_4()
+                            .w(px(420.))
+                            .child(
+                                v_flex()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child("Appearance"),
+                                    )
+                                    .child(
+                                        Select::new(&content_appearance)
+                                            .w_full()
+                                            .accessibility_label("Color theme"),
+                                    ),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child("GitHub comment template"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(
+                                                "Placeholders: {pr} {url} {verdict} {summary} {intent} {findings} {dismissed}. Leave empty for the default review format.",
+                                            ),
+                                    )
+                                    .child(
+                                        Textarea::new(&content_template)
+                                            .aria_label("GitHub comment template")
+                                            .min_h(px(140.)),
+                                    ),
+                            ),
+                    )
+                })
+                .confirm()
+                .ok_text("Save")
+                .cancel_text("Cancel")
+                .on_ok(move |_, _, cx| {
+                    let pref = match ok_appearance.read(cx).selected_value() {
+                        Some(&"Dark") => store::ThemePref::Dark,
+                        _ => store::ThemePref::Light,
+                    };
+                    let text = ok_template.read(cx).value().to_string();
+                    let template = (!text.trim().is_empty()).then_some(text);
+                    let _ = store::save_theme(pref);
+                    let _ = store::save_comment_template(template);
+                    crate::theme::apply(pref, cx);
+                    true
+                })
+        });
     }
 
     /// One command behind the header button and ⌘2: the panel slides in from
@@ -1019,7 +1220,16 @@ impl Diffy {
             cx.notify();
             return;
         };
-        let body = report.to_markdown();
+        // A configured template renders the placeholders; without one the
+        // report's built-in markdown is the body.
+        let body = match store::settings()
+            .ok()
+            .and_then(|settings| settings.comment_template)
+            .filter(|template| !template.trim().is_empty())
+        {
+            Some(template) => crate::models::render_comment_template(&template, &pr, &report),
+            None => report.to_markdown(),
+        };
         let target = format!("{}#{}", pr.repo_name(), pr.number);
         let editor = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx);
@@ -1172,40 +1382,28 @@ impl Diffy {
             .window_control_area(WindowControlArea::Drag)
     }
 
-    fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The left panel: the repositories with their PR counts. Selecting one
+    /// shows its PRs in the middle panel.
+    fn repo_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut list = v_flex()
-            .id("pr-list")
+            .id("repo-list")
             .flex_1()
             .min_h_0()
             .py_2()
-            .track_scroll(&self.list_scroll)
             .overflow_y_scrollbar();
-
-        let rows = self.state.rows.clone();
-        for row in rows {
-            match row {
-                Row::Header { repo, count } => {
-                    list = list.child(self.repo_header(&repo, count, cx));
-                }
-                Row::Pr(index) => {
-                    if let Some(pr) = self.state.prs.get(index).cloned() {
-                        list = list.child(self.pr_row(&pr, cx));
-                    }
-                }
-            }
+        for group in self.state.groups.clone() {
+            list = list.child(self.repo_row(&group.repo, group.prs.len(), cx));
         }
 
-        let visible = self.state.prs.len();
-        let prs = self.pr_count();
         let repos = self.repo_count();
-        let active = self.state.active.len();
+        let prs = self.pr_count();
 
         v_flex()
-            .w_80()
+            .id("repos-panel")
+            .relative()
+            .w(self.repos_panel_width)
             .h_full()
             .flex_shrink_0()
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
             .bg(cx.theme().sidebar)
             .child(
                 h_flex()
@@ -1227,9 +1425,137 @@ impl Diffy {
                     .child(div().flex_1()),
             )
             .child(
-                v_flex().px_3().pb_3().child(
+                h_flex()
+                    .px_4()
+                    .pt_2()
+                    .pb_1()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Repositories"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(repos.to_string()),
+                    ),
+            )
+            .child(list)
+            .child(
+                h_flex()
+                    .h_9()
+                    .flex_shrink_0()
+                    .px_3()
+                    .gap_2()
+                    .items_center()
+                    .border_t_1()
+                    .border_color(cx.theme().sidebar_border)
+                    .child(
+                        Button::new("open-settings")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Settings)
+                            .label("Settings")
+                            .tooltip("Color theme and comment template")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_settings_dialog(window, cx)
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{prs} pull request{}", plural(prs))),
+                    ),
+            )
+            // The seam between this panel and the PR list is the resize
+            // handle's own hairline, so the panel draws no border of its own.
+            .child(self.panel_resize_handle(PanelKind::Repos, REPOS_DEFAULT_WIDTH, cx))
+    }
+
+    fn repo_row(&self, repo: &str, count: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.state.selected_repo.as_deref() == Some(repo);
+        let repo_name = repo.to_string();
+        ListItem::new(ElementId::Name(format!("repo-{repo}").into()))
+            .selected(selected)
+            .accessibility_label(format!("{repo}, {count} pull requests"))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.state.select_repo(&repo_name);
+                this.reset_selection_view(cx);
+            }))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Icon::new(IconName::Github)
+                            .small()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .child(repo.to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(count.to_string()),
+                    ),
+            )
+    }
+
+    /// The middle panel: the PRs of the selected repository, with the filter
+    /// on top.
+    fn pr_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut list = v_flex()
+            .id("pr-list")
+            .flex_1()
+            .min_h_0()
+            .py_2()
+            .track_scroll(&self.list_scroll)
+            .overflow_y_scrollbar();
+
+        let rows = self.state.rows.clone();
+        for row in rows {
+            match row {
+                Row::Pr(index) => {
+                    if let Some(pr) = self.state.prs.get(index).cloned() {
+                        list = list.child(self.pr_row(&pr, cx));
+                    }
+                }
+            }
+        }
+
+        let visible = self.state.prs.len();
+        let repo = self.state.selected_repo.clone().unwrap_or_default();
+        let prs = self.pr_count();
+        let repos = self.repo_count();
+        let active = self.state.active.len();
+
+        v_flex()
+            .id("prs-panel")
+            .relative()
+            .w(self.prs_panel_width)
+            .h_full()
+            .flex_shrink_0()
+            .bg(cx.theme().sidebar)
+            .child(
+                v_flex().px_3().pt_2().pb_3().child(
                     Input::new(&self.filter)
-                        .id("repo-filter")
+                        .id("pr-filter")
                         .aria_label("Filter pull requests")
                         .bordered(false)
                         .cleanable(true)
@@ -1250,7 +1576,7 @@ impl Diffy {
             .child(
                 h_flex()
                     .px_4()
-                    .pt_2()
+                    .pt_1()
                     .pb_1()
                     .gap_2()
                     .items_center()
@@ -1258,8 +1584,9 @@ impl Diffy {
                         div()
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Pull requests"),
+                            .text_color(cx.theme().sidebar_foreground)
+                            .truncate()
+                            .child(repo),
                     )
                     .child(
                         div()
@@ -1313,27 +1640,40 @@ impl Diffy {
                         )
                     }),
             )
+            // The seam between this panel and the detail is the resize
+            // handle's own hairline.
+            .child(self.panel_resize_handle(PanelKind::Prs, PRS_DEFAULT_WIDTH, cx))
     }
 
-    fn repo_header(&self, repo: &str, count: usize, cx: &Context<Self>) -> impl IntoElement {
-        h_flex()
-            .px_3()
-            .pt_3()
-            .pb_1()
-            .gap_2()
-            .child(
-                div()
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(cx.theme().sidebar_foreground)
-                    .child(repo.to_string()),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(count.to_string()),
-            )
+    /// The drag band on a panel's right edge: dragging it resizes the panel,
+    /// double-clicking restores `default_width`.
+    fn panel_resize_handle(
+        &mut self,
+        kind: PanelKind,
+        default_width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
+        let id = match kind {
+            PanelKind::Repos => "repos-edge",
+            PanelKind::Prs => "prs-edge",
+        };
+        resize_handle(id, Axis::Horizontal)
+            .inside(HandleEdge::Trailing)
+            .on_drag(PanelResize(kind), move |drag, _, _, cx| {
+                if let Some(this) = weak.upgrade() {
+                    this.update(cx, |this, _| this.panel_dragging = true);
+                }
+                cx.new(|_| drag.clone())
+            })
+            .on_double_click(cx.listener(move |this, _, _, cx| {
+                match kind {
+                    PanelKind::Repos => this.repos_panel_width = default_width,
+                    PanelKind::Prs => this.prs_panel_width = default_width,
+                }
+                this.persist_panels();
+                cx.notify();
+            }))
     }
 
     fn pr_row(&self, pr: &PullRequest, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1557,7 +1897,7 @@ impl Diffy {
         } else if filtered {
             (
                 "No pull request matches this filter",
-                "The filter searches the repository, the title, the author, and the number.",
+                "The filter searches the title, the author, and the number within the selected repository.",
             )
         } else {
             (
@@ -2197,11 +2537,17 @@ impl Render for Diffy {
             .on_action(cx.listener(Self::on_leave_filter))
             .on_action(cx.listener(Self::on_input_escape))
             .on_action(cx.listener(Self::on_toggle_diff_panel))
+            // Any mouse up ends a handle drag; the listener persists the
+            // dragged width only when one was in progress.
+            .capture_any_mouse_up(cx.listener(Self::on_any_mouse_up))
             .child(
                 h_flex()
+                    .id("shell")
                     .items_stretch()
                     .size_full()
-                    .child(self.sidebar(cx))
+                    .on_drag_move(cx.listener(Self::on_panel_drag_move))
+                    .child(self.repo_panel(cx))
+                    .child(self.pr_panel(cx))
                     .child(self.main_pane(cx)),
             )
     }
@@ -2512,15 +2858,18 @@ fn plural(count: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiffView, Diffy, bind_keys};
+    use super::{
+        DiffView, Diffy, PRS_DEFAULT_WIDTH, PRS_MAX_WIDTH, REPOS_DEFAULT_WIDTH, REPOS_MIN_WIDTH,
+        bind_keys,
+    };
     use crate::ask::{AskEvent, AskSide, AskStatus, AskTask};
     use crate::models::{Author, PullRequest, Repository};
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::component::diff::{DiffFile, DiffLinePosition, DiffSide};
     use gpui_kit::test::{TestQueryExt, TestWindowExt};
     use gpui_kit::{
-        AnyWindowHandle, AppContext as _, Bounds, Entity, Focusable as _, Role, TestAppContext,
-        WindowBounds, WindowOptions, point, px, size,
+        AnyWindowHandle, AppContext as _, Bounds, Entity, Focusable as _, Modifiers, MouseButton,
+        Role, TestAppContext, VisualTestContext, WindowBounds, WindowOptions, point, px, size,
     };
 
     use crate::models::{Finding, ReviewReport, Verdict};
@@ -2606,7 +2955,22 @@ mod tests {
     fn typing_a_filter_narrows_the_list_and_escape_returns_to_it(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(bind_keys);
-        let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one"), pr("acme/web", 2, "two")]);
+        let (handle, view) = open_app(
+            cx,
+            vec![
+                pr("acme/api", 1, "one"),
+                pr("acme/api", 2, "two"),
+                pr("acme/web", 3, "three"),
+            ],
+        );
+        // The list shows the selected repository's PRs only; pick acme/api's
+        // second PR as the selection before filtering.
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.state.select_repo("acme/api");
+                view.state.select_url("https://github.com/acme/api/pull/2");
+            });
+        });
 
         cx.update_window(handle, |_, window, cx| {
             focus_window(&view, window, cx);
@@ -2621,18 +2985,19 @@ mod tests {
         })
         .unwrap();
 
-        cx.update_window(handle, |_, window, cx| window.input("web", cx))
+        cx.update_window(handle, |_, window, cx| window.input("one", cx))
             .unwrap();
 
         // Input events reach the view after the update that produced them.
         cx.update(|cx| {
-            assert_eq!(view.read(cx).filter.read(cx).value().to_string(), "web");
-            assert_eq!(view.read(cx).state.filter, "web");
+            assert_eq!(view.read(cx).filter.read(cx).value().to_string(), "one");
+            assert_eq!(view.read(cx).state.filter, "one");
             assert_eq!(
                 view.read(cx).state.selected_pr().map(|pr| pr.number),
-                Some(2)
+                Some(1),
+                "the filter that hides the selection falls back to the visible PR"
             );
-            assert!(view.read(cx).state.prs.iter().all(|pr| pr.number == 2));
+            assert!(view.read(cx).state.prs.iter().all(|pr| pr.number == 1));
         });
 
         cx.update_window(handle, |_, window, cx| {
@@ -2647,7 +3012,7 @@ mod tests {
                 !filter_focus.is_focused(window),
                 "escape did not return focus to the PR list"
             );
-            assert_eq!(view.read(cx).state.filter, "web");
+            assert_eq!(view.read(cx).state.filter, "one");
         })
         .unwrap();
     }
@@ -2853,6 +3218,184 @@ mod tests {
                 view.read(cx).diffs.get(PR_URL),
                 Some(DiffView::Ready { files: 1, .. })
             ));
+        });
+    }
+
+    /// The resize handles on both panel seams drag the widths within the
+    /// clamped bounds, and the drag end persists both.
+    #[gpui_kit::test]
+    fn the_panel_handles_resize_the_panels_within_the_bounds_and_persist(cx: &mut TestAppContext) {
+        // Keep the persisted settings out of the real ~/.diffy.
+        let home = std::env::temp_dir().join(format!("diffy-panels-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe { std::env::set_var("DIFFY_HOME", &home) };
+
+        cx.update(gpui_kit::init);
+        cx.update(bind_keys);
+        let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
+        let mut cx = VisualTestContext::from_window(handle, cx);
+        let draw = |cx: &mut VisualTestContext| {
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .unwrap();
+        };
+
+        cx.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.repos_panel_width, REPOS_DEFAULT_WIDTH);
+            assert_eq!(view.prs_panel_width, PRS_DEFAULT_WIDTH);
+        });
+
+        // Drag a seam from `from` to `to`; the first move past the drag
+        // threshold starts the drag, the next is what the shell hears.
+        let drag = |cx: &mut VisualTestContext, from: f32, to: f32| {
+            draw(cx);
+            cx.simulate_mouse_down(
+                point(px(from - 2.), px(300.)),
+                MouseButton::Left,
+                Modifiers::default(),
+            );
+            draw(cx);
+            cx.simulate_mouse_move(
+                point(px(from - 6.), px(300.)),
+                Some(MouseButton::Left),
+                Modifiers::default(),
+            );
+            draw(cx);
+            cx.simulate_mouse_move(
+                point(px(to), px(300.)),
+                Some(MouseButton::Left),
+                Modifiers::default(),
+            );
+            draw(cx);
+            cx.simulate_mouse_up(
+                point(px(to), px(300.)),
+                MouseButton::Left,
+                Modifiers::default(),
+            );
+            draw(cx);
+        };
+
+        // Repos seam at x=200: drag it to 260.
+        drag(&mut cx, 200., 260.);
+        cx.update(|_, cx| assert_eq!(view.read(cx).repos_panel_width, px(260.)));
+
+        // PR list seam now at 260+240=500: drag it to 700, so the list width
+        // is 700-260=440.
+        drag(&mut cx, 500., 700.);
+        cx.update(|_, cx| assert_eq!(view.read(cx).prs_panel_width, px(440.)));
+
+        // Past the bounds the drag clamps: PR list to the max, repos to the min.
+        drag(&mut cx, 700., 2000.);
+        cx.update(|_, cx| assert_eq!(view.read(cx).prs_panel_width, PRS_MAX_WIDTH));
+        drag(&mut cx, 260., 10.);
+        cx.update(|_, cx| assert_eq!(view.read(cx).repos_panel_width, REPOS_MIN_WIDTH));
+
+        // The drag ends persisted both widths.
+        cx.update(|_, _| {
+            let settings = crate::store::settings().unwrap();
+            assert_eq!(settings.panels.repos, Some(160));
+            assert_eq!(settings.panels.prs, Some(480));
+        });
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Selecting a repository in the left panel switches the middle list to
+    /// its PRs and selects the first one.
+    #[gpui_kit::test]
+    fn selecting_a_repo_switches_the_pr_list(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(bind_keys);
+        let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one"), pr("acme/web", 2, "two")]);
+        cx.update_window(handle, |_, window, cx| {
+            focus_window(&view, window, cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(view.state.selected_repo.as_deref(), Some("acme/api"));
+            assert_eq!(view.state.prs.len(), 1);
+            assert_eq!(view.state.selected_pr().map(|pr| pr.number), Some(1));
+        });
+
+        // Click the acme/web row in the repositories panel.
+        cx.update_window(handle, |_, window, cx| {
+            window.click("repo-acme/web", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(view.state.selected_repo.as_deref(), Some("acme/web"));
+            assert_eq!(view.state.prs.len(), 1);
+            assert_eq!(view.state.prs[0].number, 2);
+            assert_eq!(view.state.selected_pr().map(|pr| pr.number), Some(2));
+        });
+    }
+
+    /// The settings dialog opens from the repositories panel and saves the
+    /// chosen theme and comment template.
+    #[gpui_kit::test]
+    fn the_settings_dialog_saves_theme_and_template(cx: &mut TestAppContext) {
+        let home = std::env::temp_dir().join(format!("diffy-settings-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe { std::env::set_var("DIFFY_HOME", &home) };
+
+        cx.update(gpui_kit::init);
+        cx.update(bind_keys);
+        let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
+
+        cx.update_window(handle, |_, window, cx| {
+            focus_window(&view, window, cx);
+            view.update(cx, |this, cx| this.open_settings_dialog(window, cx));
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            let buttons = window.find_all_by_role(Role::Button);
+            let labels: Vec<Option<&str>> = buttons.iter().map(|b| b.label()).collect();
+            assert!(
+                labels.contains(&Some("Save")),
+                "the settings dialog did not open, no Save button: {labels:?}"
+            );
+            // The alert dialog's confirm button carries the id "ok".
+            window.click("ok", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        cx.update(|cx| {
+            let settings = crate::store::settings().unwrap();
+            assert_eq!(settings.theme, crate::store::ThemePref::Light);
+            assert_eq!(settings.comment_template, None);
+            let _ = cx;
+        });
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The saved theme preference drives the palette: applying dark switches
+    /// the mode, applying light switches back.
+    #[gpui_kit::test]
+    fn the_theme_preference_switches_the_palette(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            crate::theme::apply(crate::store::ThemePref::Dark, cx);
+            assert_eq!(
+                gpui_kit::component::Theme::global(cx).mode,
+                gpui_kit::component::ThemeMode::Dark
+            );
+            crate::theme::apply(crate::store::ThemePref::Light, cx);
+            assert_eq!(
+                gpui_kit::component::Theme::global(cx).mode,
+                gpui_kit::component::ThemeMode::Light
+            );
         });
     }
 

@@ -17,7 +17,6 @@ pub enum ReviewStatus {
 
 #[derive(Clone, Debug)]
 pub enum Row {
-    Header { repo: String, count: usize },
     Pr(usize),
 }
 
@@ -26,8 +25,11 @@ pub enum Row {
 #[derive(Default)]
 pub struct State {
     pub groups: Vec<PrGroup>,
+    /// PRs of the selected repository, after the filter; `rows` indexes into this.
     pub prs: Vec<PullRequest>,
     pub rows: Vec<Row>,
+    /// Repository whose PRs the list panel shows.
+    pub selected_repo: Option<String>,
     /// PR url of the selection; kept by identity so filtering and refreshing keep it.
     pub selected: Option<String>,
     pub reviews: HashMap<String, Vec<ReviewStatus>>,
@@ -50,33 +52,44 @@ impl State {
 
     pub fn set_prs(&mut self, prs: Vec<PullRequest>) {
         self.groups = group_by_repo(prs);
+        if !self
+            .selected_repo
+            .as_ref()
+            .is_some_and(|repo| self.groups.iter().any(|group| &group.repo == repo))
+        {
+            self.selected_repo = self.groups.first().map(|group| group.repo.clone());
+        }
         self.rebuild_rows();
     }
 
-    /// Rebuilds the visible rows from the full PR data, applying the filter to
-    /// the repository, title, author, and number. Filtering only hides rows, so
-    /// clearing it brings every PR back.
+    /// Shows another repository's PRs in the list panel.
+    pub fn select_repo(&mut self, repo: &str) {
+        if self.selected_repo.as_deref() != Some(repo)
+            && self.groups.iter().any(|group| group.repo == repo)
+        {
+            self.selected_repo = Some(repo.to_string());
+            self.rebuild_rows();
+        }
+    }
+
+    /// Rebuilds the visible rows from the selected repository's PRs, applying
+    /// the filter to the title, author, and number. Filtering only hides
+    /// rows, so clearing it brings every PR of the repo back.
     fn rebuild_rows(&mut self) {
         self.prs.clear();
         self.rows.clear();
 
         let needle = self.filter.trim().to_lowercase();
-        for group in &self.groups {
-            let visible: Vec<&PullRequest> = group
-                .prs
-                .iter()
-                .filter(|pr| needle.is_empty() || matches(pr, &needle))
-                .collect();
-            if visible.is_empty() {
-                continue;
-            }
-            self.rows.push(Row::Header {
-                repo: group.repo.clone(),
-                count: visible.len(),
-            });
-            for pr in visible {
-                self.rows.push(Row::Pr(self.prs.len()));
-                self.prs.push(pr.clone());
+        if let Some(group) = self
+            .groups
+            .iter()
+            .find(|group| Some(&group.repo) == self.selected_repo.as_ref())
+        {
+            for pr in &group.prs {
+                if needle.is_empty() || matches(pr, &needle) {
+                    self.rows.push(Row::Pr(self.prs.len()));
+                    self.prs.push(pr.clone());
+                }
             }
         }
 
@@ -311,7 +324,8 @@ mod tests {
 
     #[test]
     fn different_prs_review_concurrently_but_a_pr_reviews_once() {
-        let mut state = State::new(vec![pr(1, "acme/api"), pr(2, "acme/web")]);
+        let mut state = State::new(vec![pr(1, "acme/api"), pr(2, "acme/api")]);
+        state.select_url("https://github.com/acme/api/pull/1");
         let first = state.selected_pr().unwrap().clone();
         assert!(state.begin_review().is_some());
         assert!(
@@ -319,7 +333,7 @@ mod tests {
             "same PR must not start twice"
         );
 
-        state.select_url("https://github.com/acme/web/pull/2");
+        state.select_url("https://github.com/acme/api/pull/2");
         let second = state.selected_pr().unwrap().clone();
         assert_ne!(first.url, second.url);
         assert!(state.begin_review().is_some());
@@ -383,22 +397,59 @@ mod tests {
     }
 
     #[test]
-    fn repo_filter_hides_rows_without_dropping_prs() {
+    fn selecting_a_repo_switches_the_listed_prs() {
         let mut state = State::new(vec![pr(1, "acme/api"), pr(2, "acme/web")]);
-        state.set_filter("WEB".to_string());
+        assert_eq!(state.selected_repo.as_deref(), Some("acme/api"));
         assert_eq!(state.prs.len(), 1);
-        assert_eq!(state.prs[0].repo_name(), "acme/web");
+        assert_eq!(state.prs[0].number, 1);
+
+        state.select_repo("acme/web");
+        assert_eq!(state.prs.len(), 1);
+        assert_eq!(state.prs[0].number, 2);
+        assert_eq!(
+            state.selected_pr().map(|pr| pr.number),
+            Some(2),
+            "switching repos selects the first PR of the new repo"
+        );
+
+        state.select_repo("acme/missing");
+        assert_eq!(state.selected_repo.as_deref(), Some("acme/web"));
+    }
+
+    #[test]
+    fn the_filter_narrows_the_selected_repo_without_dropping_prs() {
+        let mut state = State::new(vec![
+            pr(1, "acme/api"),
+            pr(2, "acme/api"),
+            pr(3, "acme/web"),
+        ]);
+        assert_eq!(
+            state.prs.len(),
+            2,
+            "only the selected repo's PRs are listed"
+        );
+
+        state.set_filter("PR 2".to_string());
+        assert_eq!(state.prs.len(), 1);
+        assert_eq!(state.prs[0].number, 2);
 
         state.clear_filter();
         assert_eq!(state.prs.len(), 2);
-        assert_eq!(state.rows.len(), 4);
+        assert_eq!(state.rows.len(), 2);
     }
 
     #[test]
     fn the_filter_matches_title_author_and_number() {
-        let mut state = State::new(vec![pr(1, "acme/api"), pr(2, "acme/web")]);
-        state.groups[0].prs[0].title = "Fix login redirect".to_string();
-        state.groups[0].prs[0].author.login = "ada".to_string();
+        let mut state = State::new(vec![pr(1, "acme/api"), pr(2, "acme/api")]);
+        // Groups sort PRs by number descending, so find PR 1 by its number.
+        let first = state
+            .groups
+            .iter_mut()
+            .flat_map(|group| group.prs.iter_mut())
+            .find(|pr| pr.number == 1)
+            .unwrap();
+        first.title = "Fix login redirect".to_string();
+        first.author.login = "ada".to_string();
         state.set_prs(
             state
                 .groups
@@ -421,16 +472,16 @@ mod tests {
 
     #[test]
     fn filtering_keeps_the_selection_when_it_is_still_visible() {
-        let mut state = State::new(vec![pr(1, "acme/api"), pr(2, "acme/web")]);
-        state.select_url("https://github.com/acme/web/pull/2");
-        state.set_filter("web".to_string());
+        let mut state = State::new(vec![pr(1, "acme/api"), pr(2, "acme/api")]);
+        state.select_url("https://github.com/acme/api/pull/2");
+        state.set_filter("PR 2".to_string());
         assert_eq!(
             state.selected_pr().map(|pr| pr.number),
             Some(2),
             "the selected PR survives a filter that still shows it"
         );
 
-        state.set_filter("api".to_string());
+        state.set_filter("PR 1".to_string());
         assert_eq!(
             state.selected_pr().map(|pr| pr.number),
             Some(1),

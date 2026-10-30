@@ -269,6 +269,42 @@ impl ReviewReport {
     }
 }
 
+/// Renders a user-configured comment template for the review posted to
+/// GitHub. Placeholders: `{pr}` (`acme/api#12`), `{url}`, `{verdict}`
+/// (`approve` / `request changes`), `{summary}`, `{intent}`, `{findings}`
+/// (markdown block, worst first), `{dismissed}` (count of filtered-out
+/// findings). Unknown placeholders are left as written.
+pub fn render_comment_template(template: &str, pr: &PullRequest, report: &ReviewReport) -> String {
+    let mut findings: Vec<&Finding> = report
+        .confirmed
+        .iter()
+        .chain(report.accepted.iter())
+        .collect();
+    findings.sort_by_key(|finding| finding.severity_rank());
+
+    let mut findings_md = String::new();
+    for finding in &findings {
+        findings_md.push_str(&format!("**{}**\n\n", finding.heading()));
+        if !finding.detail.trim().is_empty() {
+            findings_md.push_str(finding.detail.trim());
+            findings_md.push_str("\n\n");
+        }
+    }
+
+    let verdict = match report.verdict {
+        Verdict::Merge => "approve",
+        Verdict::RequestChanges => "request changes",
+    };
+    template
+        .replace("{pr}", &format!("{}#{}", pr.repo_name(), pr.number))
+        .replace("{url}", &pr.url)
+        .replace("{verdict}", verdict)
+        .replace("{summary}", report.summary.trim())
+        .replace("{intent}", report.intent.trim())
+        .replace("{findings}", findings_md.trim_end())
+        .replace("{dismissed}", &report.dismissed.len().to_string())
+}
+
 fn de_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: Deserializer<'de>,
@@ -486,5 +522,55 @@ mod tests {
         let mut pull = pr(1, "", "https://github.com/acme/widgets/pull/1");
         pull.repository.name_with_owner.clear();
         assert_eq!(pull.repo_name(), "acme/widgets");
+    }
+
+    #[test]
+    fn comment_template_renders_the_placeholders() {
+        let pull = pr(12, "acme/api", "https://github.com/acme/api/pull/12");
+        let report = ReviewReport {
+            verdict: Verdict::RequestChanges,
+            summary: "Needs work.".to_string(),
+            intent: "The PR does not match the description.".to_string(),
+            confirmed: vec![Finding {
+                severity: "high".to_string(),
+                title: "panic on empty input".to_string(),
+                detail: "unwrap on None".to_string(),
+                ..Finding::default()
+            }],
+            accepted: vec![Finding {
+                severity: "low".to_string(),
+                title: "typo".to_string(),
+                ..Finding::default()
+            }],
+            dismissed: vec![(Finding::default(), "speculation".to_string())],
+        };
+
+        let out = render_comment_template(
+            "Review of {pr} ({url})\n\n{summary}\n{intent}\n\n{findings}\nVerdict: {verdict}\n{dismissed} dismissed",
+            &pull,
+            &report,
+        );
+        assert!(out.contains("Review of acme/api#12 (https://github.com/acme/api/pull/12)"));
+        assert!(out.contains("Needs work."));
+        assert!(out.contains("The PR does not match the description."));
+        // Worst first: the high finding before the low one.
+        let high = out.find("panic on empty input").unwrap();
+        let low = out.find("typo").unwrap();
+        assert!(high < low);
+        assert!(out.contains("Verdict: request changes"));
+        assert!(out.contains("1 dismissed"));
+
+        // Unknown placeholders are left as written; an empty findings block
+        // renders empty.
+        let empty = ReviewReport {
+            verdict: Verdict::Merge,
+            summary: String::new(),
+            intent: String::new(),
+            confirmed: Vec::new(),
+            accepted: Vec::new(),
+            dismissed: Vec::new(),
+        };
+        let out = render_comment_template("{findings}|{unknown}|{verdict}", &pull, &empty);
+        assert_eq!(out, "|{unknown}|approve");
     }
 }
