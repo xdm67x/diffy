@@ -6,44 +6,52 @@ use std::process::Stdio;
 
 const PR_FIELDS: &str = "number,title,url,body,repository,author,isDraft,updatedAt,commentsCount";
 
-/// Open PRs where the user and the configured teams are requested for review.
+/// The open PRs waiting on the user: the ones where they or a configured team
+/// are asked to review, plus the ones they wrote themselves. Drafts are not
+/// ready to review, so they never enter the queue.
 /// Teams come from `~/.diffy/settings.json` (`{"teams": ["acme/backend"]}`),
 /// falling back to the comma-separated `DIFFY_TEAMS` variable.
-pub fn get_review_prs() -> Result<Vec<PullRequest>> {
+pub fn get_prs() -> Result<Vec<PullRequest>> {
     let mut targets = vec!["@me".to_string()];
     targets.extend(targets_from_teams(configured_teams()?));
     targets.dedup();
 
     let mut prs = Vec::new();
     for target in targets {
-        let output = crate::exec::command("gh")
-            .args([
-                "search",
-                "prs",
-                "--review-requested",
-                &target,
-                "--state",
-                "open",
-                "--limit",
-                "100",
-                "--json",
-                PR_FIELDS,
-            ])
-            .output()
-            .wrap_err("failed to run `gh`; is the GitHub CLI installed?")?;
-
-        if !output.status.success() {
-            return Err(eyre!(
-                "gh search prs failed for review target {target}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-
-        let mut found: Vec<PullRequest> = serde_json::from_slice(&output.stdout)
-            .wrap_err_with(|| format!("could not parse `gh search prs` output for {target}"))?;
-        prs.append(&mut found);
+        prs.extend(search_prs("--review-requested", &target)?);
     }
-    Ok(prs)
+    let mut authored = search_prs("--author", "@me")?;
+    for pr in &mut authored {
+        pr.by_me = true;
+    }
+    prs.append(&mut authored);
+    Ok(without_drafts(prs))
+}
+
+/// One `gh search prs` page for a single filter, e.g. `--author @me`.
+fn search_prs(flag: &str, value: &str) -> Result<Vec<PullRequest>> {
+    let output = crate::exec::command("gh")
+        .args([
+            "search", "prs", flag, value, "--state", "open", "--limit", "100", "--json", PR_FIELDS,
+        ])
+        .output()
+        .wrap_err("failed to run `gh`; is the GitHub CLI installed?")?;
+
+    if !output.status.success() {
+        return Err(eyre!(
+            "gh search prs {flag} {value} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    serde_json::from_slice(&output.stdout)
+        .wrap_err_with(|| format!("could not parse `gh search prs` output for {flag} {value}"))
+}
+
+/// The draft filter runs here rather than through a search flag, so the rule
+/// holds whatever the installed `gh` supports.
+fn without_drafts(prs: Vec<PullRequest>) -> Vec<PullRequest> {
+    prs.into_iter().filter(|pr| !pr.is_draft).collect()
 }
 
 fn configured_teams() -> Result<Vec<String>> {
@@ -165,4 +173,37 @@ pub fn fetch_diff(pr: &PullRequest) -> Result<String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Author, Repository};
+
+    fn pr(number: u64, is_draft: bool) -> PullRequest {
+        PullRequest {
+            number,
+            title: format!("PR {number}"),
+            url: format!("https://github.com/acme/api/pull/{number}"),
+            body: String::new(),
+            repository: Repository {
+                name_with_owner: "acme/api".to_string(),
+            },
+            author: Author::default(),
+            is_draft,
+            by_me: false,
+            updated_at: String::new(),
+            comments_count: 0,
+        }
+    }
+
+    #[test]
+    fn drafts_never_enter_the_queue() {
+        let kept = without_drafts(vec![pr(1, false), pr(2, true), pr(3, false)]);
+        assert_eq!(
+            kept.iter().map(|pr| pr.number).collect::<Vec<_>>(),
+            [1, 3],
+            "a draft is not ready to review"
+        );
+    }
 }

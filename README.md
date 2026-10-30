@@ -1,11 +1,12 @@
 # Diffy
 
 Diffy is a desktop app for reviewing the pull requests that are waiting on **you**.
-It finds open PRs where you (or your team) are requested as a reviewer via the GitHub
-CLI, groups them by repository, and runs a two-reviewer + judge AI review for the PR you
-select. Several PRs can be reviewed at the same time, each run is kept in that PR's review
-history so you can run it again after new commits and compare, and you can post a review to
-GitHub as an approval, a request for changes, or a comment.
+It finds the open PRs where you (or your team) are requested as a reviewer, plus the open
+PRs you wrote yourself, groups them by repository, and runs a two-reviewer + judge AI review
+for the PR you select. Several PRs can be reviewed at the same time, each run is kept in that
+PR's review history so you can run it again after new commits and compare, you can read the
+PR's diff beside the review, and you can post a review to GitHub as an approval, a request
+for changes, or a comment.
 
 The review list lives in an always-open sidebar beside the review. The interface is built with
 [GPUI](https://gpui.rs/) and [GPUI Kit](https://gpui-kit.com/).
@@ -49,29 +50,40 @@ To include team review requests, list the teams in `~/.diffy/settings.json`:
 The file is optional; without it Diffy falls back to the comma-separated `DIFFY_TEAMS`
 variable. Settings are re-read on every refresh (`⌘R`).
 
-By default Diffy asks GitHub for open PRs with `--review-requested=@me`. Each target is
-fetched with `gh search prs --limit 100`; results are deduplicated by URL and sorted by
-repository and PR number.
+By default Diffy asks GitHub for open PRs with `--review-requested=@me`, plus your own open
+PRs with `--author=@me`. Each target is fetched with `gh search prs --limit 100`; results are
+deduplicated by URL and sorted by repository and PR number. Drafts are left out of the list:
+an open draft is not ready to review yet.
 
 ## The window
 
-Diffy opens in a dark, near-black window that sits next to an editor. The review requests
+Diffy opens in a dark, near-black window that sits next to an editor. The pull requests
 live in a full-height sidebar on the left and the selected PR on the right. The window
 controls sit inside the sidebar, which stays open beside the review.
 
-The sidebar starts with the filter field, then a **Review requests** header with the visible
+The sidebar starts with the filter field, then a **Pull requests** header with the visible
 count and a refresh button, then the list grouped by repository, newest PR first. Each row
 wraps long titles to two lines and shows the author, how long ago the PR changed, the
 number, and the state of that PR's latest review. A PR that changed after its newest review
 is marked **out of date**, so you know to run the review again before posting it. The footer
-shows the total requests and repositories, or the reviews running right now.
+shows the total pull requests and repositories, or the reviews running right now.
 
-The review pane has a fixed header with the PR title, author, age, comment count, draft
-state, a link to GitHub, and the review actions. The body leads with the review, because
-that is what you opened the PR for: the verdict, the intent, the summary, the findings
-worst severity first, and the findings the judge filtered out. The PR description follows
-below as context. The status bar at the bottom of the review pane shows your place in the
-list, the shortcut summary, and the last error or success message.
+The review pane has a fixed header with the PR title, author, age, comment count, a **Yours**
+tag on the PRs you wrote, a link to GitHub, and the review actions. Under it, the **Review**
+and **Diff** tabs switch the pane between two bodies.
+
+**Review** leads with the review, because that is what you opened the PR for: the verdict,
+the intent, the summary, the findings worst severity first, and the findings the judge
+filtered out. The PR description follows below as context.
+
+**Diff** is the PR's patch: every changed file, with its hunk headers, line numbers, and
+added and removed lines, in one virtualized list that scrolls on its own and expands folded
+context on click. The diff is fetched the first time you open the tab and kept per PR until
+the next refresh, so returning to a PR costs nothing. A failed fetch says why and offers
+**Try again**.
+
+The status bar at the bottom of the review pane shows your place in the list, the shortcut
+summary, and the last error or success message.
 
 The filter matches the repository, the PR title, the author, and the number (`#482`), so a
 queue can be narrowed without remembering which repository a PR belongs to. The `⌘F` hint
@@ -81,24 +93,28 @@ inside the field focuses it.
 
 | Key | Action |
 | --- | --- |
+| `⌘1` | Show the review |
+| `⌘2` | Show the diff |
 | `⌘F` | Focus the PR filter |
 | `⌘R` | Refresh the PR list from GitHub |
 | `Esc` | Leave the filter |
 
-Selection, running a review, stepping through review history, and submitting a review are
-done with the window controls: click a PR row, use the **Run review** button, the review
-history arrows, and the **Comment** / **Request changes** / **Approve** buttons.
+Selection, running a review, stepping through review history, switching tabs, and submitting
+a review are done with the window controls: click a PR row, use the **Run review** button,
+the review history arrows, the **Review** / **Diff** tabs, and the
+**Comment** / **Request changes** / **Approve** buttons.
 
 Posting uses the buttons in the review header: **Comment**, **Request changes**, and
 **Approve**. Each one opens a dialog naming the PR with the review body in an editable text
 field, and nothing is posted before you confirm. They are disabled while a post is in flight
-and while no finished review is shown.
+and while no finished review is shown. On a PR you wrote, GitHub refuses an approval and a
+change request of your own work, so only **Comment** is offered there.
 
-With the mouse you can click a PR to select it, scroll the PR list or the review pane, use
-the refresh button in the **Review requests** header.
+With the mouse you can click a PR to select it, scroll the PR list or the review pane, switch
+between the review and the diff, use the refresh button in the **Pull requests** header.
 
 The filter only hides rows. Every fetched PR stays loaded, so clearing the filter brings
-all of your review requests back, and the selection follows a PR by its url rather than its
+all of your pull requests back, and the selection follows a PR by its url rather than its
 position. Failures (a failed refresh, review, save, or post) appear in the
 status bar and stay there until the next action.
 
@@ -162,9 +178,9 @@ is part of the diff. The confirmation dialog shows the body in a text field, and
 it holds when you confirm is what gets posted. The body goes to `gh` through stdin, so its
 length is not limited by the command line.
 
-Nothing is posted before you confirm the dialog, and a failure (for example GitHub refusing
-an approval on a PR you authored) shows up in the status bar. Diffy does not record which
-reviews were posted, so posting the same report twice creates two GitHub reviews.
+Nothing is posted before you confirm the dialog, and a failure (for example a revoked token)
+shows up in the status bar. Diffy does not record which reviews were posted, so posting the
+same report twice creates two GitHub reviews.
 
 ## Saved reviews
 
@@ -240,7 +256,7 @@ access.
 ```
 src/
   main.rs                    bootstrap, window options, key bindings
-  app.rs                     GPUI view: sidebar, review pane, actions, posting dialog
+  app.rs                     GPUI view: sidebar, review and diff panes, actions, posting dialog
   state.rs                   PR list, filter, selection, review history (no UI types)
   api.rs                     gh search / gh pr diff / gh pr review
   models.rs                  PRs, findings, verdicts, repo grouping

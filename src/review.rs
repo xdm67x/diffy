@@ -188,7 +188,6 @@ spans lines or needs a judgement call, use `null`.
 PR: {repo}#{number} — {title}
 URL: {url}
 Author: {author}
-Draft: {draft}
 Updated: {updated}
 
 PR DESCRIPTION
@@ -223,7 +222,6 @@ Use line: null when a line number is not applicable. An empty findings array is 
         title = pr.title,
         url = pr.url,
         author = pr.author.login,
-        draft = pr.is_draft,
         updated = pr.updated_at,
         description = pr.description(),
         diff = diff,

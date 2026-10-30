@@ -9,6 +9,7 @@ use crate::time;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt,
     button::{Button, ButtonVariant, ButtonVariants},
+    diff::{Diff, DiffFile, DiffState},
     h_flex,
     input::{Escape as InputEscape, Input, InputEvent, InputState, Textarea, TextareaState},
     link::Link,
@@ -16,6 +17,7 @@ use gpui_kit::component::{
     scroll::ScrollableElement,
     spinner::Spinner,
     status_bar::StatusBar,
+    tab::{Tab, TabBar},
     tag::Tag,
     text::TextView,
     v_flex,
@@ -31,15 +33,41 @@ const CONTEXT: &str = "Diffy";
 /// context only keeps escape and the modifier shortcut for the sidebar.
 const FILTER_CONTEXT: &str = "DiffyFilter";
 
-actions!(diffy, [RefreshPrs, FocusFilter, LeaveFilter]);
+actions!(
+    diffy,
+    [RefreshPrs, FocusFilter, LeaveFilter, ShowReview, ShowDiff]
+);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-f", FocusFilter, Some(CONTEXT)),
         KeyBinding::new("cmd-r", RefreshPrs, Some(CONTEXT)),
+        KeyBinding::new("cmd-1", ShowReview, Some(CONTEXT)),
+        KeyBinding::new("cmd-2", ShowDiff, Some(CONTEXT)),
         KeyBinding::new("escape", LeaveFilter, Some(FILTER_CONTEXT)),
         KeyBinding::new("cmd-r", RefreshPrs, Some(FILTER_CONTEXT)),
+        KeyBinding::new("cmd-1", ShowReview, Some(FILTER_CONTEXT)),
+        KeyBinding::new("cmd-2", ShowDiff, Some(FILTER_CONTEXT)),
     ]);
+}
+
+/// Which surface the review pane shows under the PR header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DetailTab {
+    Review,
+    Diff,
+}
+
+/// What the diff pane knows about the selected PR's patch.
+enum DiffView {
+    /// The request the pane is waiting for, so a fetch that a refresh or a
+    /// retry replaced cannot install an older patch.
+    Loading(u64),
+    Ready {
+        state: Entity<DiffState>,
+        files: usize,
+    },
+    Failed(String),
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -63,6 +91,12 @@ pub struct Diffy {
     loading: bool,
     posting: Option<ReviewAction>,
     notice: Option<Notice>,
+    /// The review pane's surface, kept across PRs and filtering.
+    tab: DetailTab,
+    /// Fetched patches, keyed by PR url and dropped on every refresh.
+    diffs: HashMap<String, DiffView>,
+    /// Counter behind the identity of each diff request.
+    diff_requests: u64,
     /// When each running review started, keyed by PR url.
     started: HashMap<String, Instant>,
     events: Sender<ReviewEvent>,
@@ -127,6 +161,9 @@ impl Diffy {
             loading: false,
             posting: None,
             notice: None,
+            tab: DetailTab::Review,
+            diffs: HashMap::new(),
+            diff_requests: 0,
             started: HashMap::new(),
             events,
             _subscriptions: vec![subscription],
@@ -163,15 +200,18 @@ impl Diffy {
             return;
         }
         self.loading = true;
-        log::info("refreshing review requests");
+        log::info("refreshing pull requests");
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async { api::get_review_prs() }).await;
+            let result = cx.background_spawn(async { api::get_prs() }).await;
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
                     Ok(prs) => {
-                        log::info(format!("loaded {} review requests", prs.len()));
+                        log::info(format!("loaded {} pull requests", prs.len()));
+                        // A PR that moved may have a new patch, so nothing
+                        // fetched earlier is reused after a refresh.
+                        this.diffs.clear();
                         this.state.set_prs(prs);
                         this.notice = Some(Notice {
                             text: "Updated just now".to_string(),
@@ -180,7 +220,7 @@ impl Diffy {
                         this.reset_selection_view(cx);
                     }
                     Err(error) => {
-                        this.set_error(format!("Could not load review requests: {error:#}"))
+                        this.set_error(format!("Could not load pull requests: {error:#}"))
                     }
                 }
                 cx.notify();
@@ -272,12 +312,101 @@ impl Diffy {
         self.reset_selection_view(cx);
     }
 
+    /// Everything that follows a selection change, including the patch of the
+    /// PR the diff pane now shows.
     fn reset_selection_view(&mut self, cx: &mut Context<Self>) {
         self.reset_detail_scroll();
         if let Some(row) = self.state.selected_row() {
             self.list_scroll.scroll_to_item(row);
         }
+        if self.tab == DetailTab::Diff {
+            self.load_diff(cx);
+        }
         cx.notify();
+    }
+
+    fn show_tab(&mut self, tab: DetailTab, cx: &mut Context<Self>) {
+        if self.tab != tab {
+            self.tab = tab;
+            cx.notify();
+        }
+        if tab == DetailTab::Diff {
+            self.load_diff(cx);
+        }
+    }
+
+    /// Fetches the patch the first time the diff pane shows this PR; the
+    /// result is kept by PR url until the next refresh.
+    fn load_diff(&mut self, cx: &mut Context<Self>) {
+        let Some(pr) = self.state.selected_pr().cloned() else {
+            return;
+        };
+        if self.diffs.contains_key(&pr.url) {
+            return;
+        }
+        self.diff_requests += 1;
+        let request = self.diff_requests;
+        self.diffs
+            .insert(pr.url.clone(), DiffView::Loading(request));
+        cx.notify();
+        let url = pr.url.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { api::fetch_diff(&pr) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.diff_is_pending(&url, request) {
+                    return;
+                }
+                let patch = match result {
+                    Ok(patch) => DiffFile::parse(&patch).map_err(|error| error.to_string()),
+                    Err(error) => Err(format!("{error:#}")),
+                };
+                this.set_diff(&url, patch, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// True while the pane still waits for this fetch. A refresh or a retry
+    /// replaces the request, and the older patch must not install over it.
+    fn diff_is_pending(&self, url: &str, request: u64) -> bool {
+        matches!(self.diffs.get(url), Some(DiffView::Loading(current)) if *current == request)
+    }
+
+    /// Installs a fetched patch. An empty patch reads like a failure: there is
+    /// nothing to scroll either way, and both offer another attempt.
+    fn set_diff(
+        &mut self,
+        url: &str,
+        patch: Result<Vec<DiffFile>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let view = match patch {
+            Ok(changes) if changes.is_empty() => {
+                DiffView::Failed("This pull request has no file changes to show.".to_string())
+            }
+            Ok(changes) => {
+                let files = changes.len();
+                DiffView::Ready {
+                    state: cx.new(|cx| DiffState::new(changes, cx)),
+                    files,
+                }
+            }
+            Err(error) => {
+                log::error(format!("could not load the diff of {url}: {error}"));
+                DiffView::Failed(error)
+            }
+        };
+        self.diffs.insert(url.to_string(), view);
+        cx.notify();
+    }
+
+    fn retry_diff(&mut self, cx: &mut Context<Self>) {
+        if let Some(url) = self.state.selected_pr().map(|pr| pr.url.clone()) {
+            self.diffs.remove(&url);
+        }
+        self.load_diff(cx);
     }
 
     fn reset_detail_scroll(&mut self) {
@@ -288,7 +417,7 @@ impl Diffy {
         self.state.groups.len()
     }
 
-    fn request_count(&self) -> usize {
+    fn pr_count(&self) -> usize {
         self.state.groups.iter().map(|group| group.prs.len()).sum()
     }
 
@@ -432,6 +561,14 @@ impl Diffy {
         self.refresh(cx);
     }
 
+    fn on_show_review(&mut self, _: &ShowReview, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_tab(DetailTab::Review, cx);
+    }
+
+    fn on_show_diff(&mut self, _: &ShowDiff, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_tab(DetailTab::Diff, cx);
+    }
+
     fn on_focus_filter(&mut self, _: &FocusFilter, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_filter(window, cx);
     }
@@ -495,7 +632,7 @@ impl Diffy {
         }
 
         let visible = self.state.prs.len();
-        let requests = self.request_count();
+        let prs = self.pr_count();
         let repos = self.repo_count();
         let active = self.state.active.len();
 
@@ -520,7 +657,7 @@ impl Diffy {
                 v_flex().px_3().pb_3().child(
                     Input::new(&self.filter)
                         .id("repo-filter")
-                        .aria_label("Filter review requests")
+                        .aria_label("Filter pull requests")
                         .bordered(false)
                         .cleanable(true)
                         .prefix(Icon::new(IconName::Search).small())
@@ -549,7 +686,7 @@ impl Diffy {
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(cx.theme().muted_foreground)
-                            .child("Review requests"),
+                            .child("Pull requests"),
                     )
                     .child(
                         div()
@@ -563,7 +700,7 @@ impl Diffy {
                             .ghost()
                             .small()
                             .icon(IconName::RefreshCw)
-                            .tooltip("Reload review requests (⌘R)")
+                            .tooltip("Reload pull requests (⌘R)")
                             .loading(self.loading)
                             .disabled(self.loading)
                             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
@@ -603,8 +740,8 @@ impl Diffy {
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(format!(
-                                    "{requests} request{} · {repos} repo{}",
-                                    plural(requests),
+                                    "{prs} pull request{} · {repos} repo{}",
+                                    plural(prs),
                                     plural(repos)
                                 )),
                         )
@@ -774,29 +911,100 @@ impl Diffy {
                 .child(self.empty_detail(cx));
         };
         let history_len = self.state.review_history(&pr).len();
+        let body = match self.tab {
+            DetailTab::Review => self.review_body(&pr, cx),
+            DetailTab::Diff => self.diff_body(&pr, cx),
+        };
         v_flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .child(self.detail_header(&pr, history_len, cx))
+            .child(body)
+    }
+
+    fn review_body(&mut self, pr: &PullRequest, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("review-scroll")
+            .flex_1()
+            .min_h_0()
+            .track_scroll(&self.detail_scroll)
+            .overflow_y_scrollbar()
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(rems(40.))
+                    .mx_auto()
+                    .p_6()
+                    .gap_6()
+                    .child(self.review(pr, cx))
+                    .child(self.description(pr, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The diff pane. The viewer owns its own scrolling, so it takes the whole
+    /// pane under the header instead of living inside the review scroll.
+    fn diff_body(&mut self, pr: &PullRequest, cx: &mut Context<Self>) -> AnyElement {
+        match self.diffs.get(&pr.url) {
+            Some(DiffView::Ready { state, .. }) => div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .child(Diff::new(state))
+                .into_any_element(),
+            Some(DiffView::Failed(error)) => self.diff_failed(error.clone(), cx),
+            Some(DiffView::Loading(_)) | None => v_flex()
+                .flex_1()
+                .min_h_0()
+                .justify_center()
+                .items_center()
+                .gap_3()
+                .child(Spinner::new().large())
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Loading the diff…"),
+                )
+                .into_any_element(),
+        }
+    }
+
+    fn diff_failed(&self, error: String, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .justify_center()
+            .items_center()
+            .gap_3()
+            .p_6()
+            .child(
+                Icon::new(IconName::CircleAlert)
+                    .large()
+                    .text_color(cx.theme().danger),
+            )
             .child(
                 div()
-                    .id("review-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .track_scroll(&self.detail_scroll)
-                    .overflow_y_scrollbar()
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .max_w(rems(40.))
-                            .mx_auto()
-                            .p_6()
-                            .gap_6()
-                            .child(self.review(&pr, cx))
-                            .child(self.description(&pr, cx)),
-                    ),
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Could not load the diff"),
             )
+            .child(
+                div()
+                    .max_w_96()
+                    .text_sm()
+                    .text_center()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(error),
+            )
+            .child(
+                Button::new("retry-diff")
+                    .label("Try again")
+                    .outline()
+                    .on_click(cx.listener(|this, _, _, cx| this.retry_diff(cx))),
+            )
+            .into_any_element()
     }
 
     fn empty_detail(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -804,8 +1012,8 @@ impl Diffy {
         let filtered = !self.state.filter.trim().is_empty();
         let (title, body) = if loading {
             (
-                "Loading review requests",
-                "Fetching open PRs where you or your team is requested.",
+                "Loading pull requests",
+                "Fetching the open PRs waiting on you.",
             )
         } else if filtered {
             (
@@ -814,8 +1022,8 @@ impl Diffy {
             )
         } else {
             (
-                "No review requests",
-                "Open pull requests where you or your team is asked to review appear here.",
+                "No pull requests",
+                "Open pull requests where you or your team is asked to review, and the open pull requests you wrote, appear here.",
             )
         };
 
@@ -944,9 +1152,7 @@ impl Diffy {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(pr.title.clone()),
                 )
-                .when(pr.is_draft, |this| {
-                    this.child(Tag::warning().child("Draft"))
-                }),
+                .when(pr.by_me, |this| this.child(Tag::new().child("Yours"))),
         );
 
         header = header.child(
@@ -990,26 +1196,40 @@ impl Diffy {
                                     this.confirm_post(ReviewAction::Comment, window, cx)
                                 })),
                         )
-                        .child(
-                            Button::new("post-changes")
-                                .label("Request changes")
-                                .danger()
-                                .disabled(busy)
-                                .loading(self.posting == Some(ReviewAction::RequestChanges))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.confirm_post(ReviewAction::RequestChanges, window, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("post-approve")
-                                .label("Approve")
-                                .success()
-                                .disabled(busy)
-                                .loading(self.posting == Some(ReviewAction::Approve))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.confirm_post(ReviewAction::Approve, window, cx)
-                                })),
-                        )
+                        // GitHub refuses an approval or a change request on your
+                        // own PR, so only the comment is offered there.
+                        .when(!pr.by_me, |this| {
+                            this.child(
+                                Button::new("post-changes")
+                                    .label("Request changes")
+                                    .danger()
+                                    .disabled(busy)
+                                    .loading(self.posting == Some(ReviewAction::RequestChanges))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.confirm_post(ReviewAction::RequestChanges, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("post-approve")
+                                    .label("Approve")
+                                    .success()
+                                    .disabled(busy)
+                                    .loading(self.posting == Some(ReviewAction::Approve))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.confirm_post(ReviewAction::Approve, window, cx)
+                                    })),
+                            )
+                        })
+                        .when(pr.by_me, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        "GitHub only accepts comments on your own pull requests.",
+                                    ),
+                            )
+                        })
                 }),
         );
 
@@ -1019,7 +1239,38 @@ impl Diffy {
             .bg(cx.theme().sidebar)
             .border_b_1()
             .border_color(cx.theme().sidebar_border)
-            .child(v_flex().w_full().max_w(rems(40.)).mx_auto().child(header))
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(rems(40.))
+                    .mx_auto()
+                    .gap_3()
+                    .child(header)
+                    .child(self.detail_tabs(pr, cx)),
+            )
+    }
+
+    /// The review and diff switcher. The tab component activates from the
+    /// pointer only, so ⌘1 and ⌘2 give the same switch a keyboard path.
+    fn detail_tabs(&self, pr: &PullRequest, cx: &mut Context<Self>) -> impl IntoElement {
+        let diff_label = match self.diffs.get(&pr.url) {
+            Some(DiffView::Ready { files, .. }) => format!("Diff ({files})"),
+            _ => "Diff".to_string(),
+        };
+        TabBar::new("detail-tabs")
+            .segmented()
+            .small()
+            .selected_index(if self.tab == DetailTab::Diff { 1 } else { 0 })
+            .on_click(cx.listener(|this, index, _, cx| {
+                let tab = if *index == 1 {
+                    DetailTab::Diff
+                } else {
+                    DetailTab::Review
+                };
+                this.show_tab(tab, cx)
+            }))
+            .child(Tab::new().label("Review"))
+            .child(Tab::new().label(diff_label))
     }
 
     fn description(&mut self, pr: &PullRequest, cx: &Context<Self>) -> impl IntoElement {
@@ -1347,7 +1598,7 @@ impl Diffy {
     }
 
     fn status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let hints = "⌘F filter · ⌘R refresh";
+        let hints = "⌘1 review · ⌘2 diff · ⌘F filter · ⌘R refresh";
         let position = self
             .state
             .prs
@@ -1410,6 +1661,8 @@ impl Render for Diffy {
             .on_action(cx.listener(Self::on_focus_filter))
             .on_action(cx.listener(Self::on_leave_filter))
             .on_action(cx.listener(Self::on_input_escape))
+            .on_action(cx.listener(Self::on_show_review))
+            .on_action(cx.listener(Self::on_show_diff))
             .child(
                 h_flex()
                     .items_stretch()
@@ -1560,9 +1813,6 @@ fn pr_meta(pr: &PullRequest) -> String {
     if let Some(updated) = time::parse_utc(&pr.updated_at) {
         parts.push(time::ago(updated, time::now()));
     }
-    if pr.is_draft {
-        parts.push("draft".to_string());
-    }
     parts.join(" · ")
 }
 
@@ -1580,11 +1830,12 @@ fn plural(count: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Diffy, bind_keys};
+    use super::{DetailTab, DiffView, Diffy, bind_keys};
     use crate::models::{Author, PullRequest, Repository};
-    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::component::diff::DiffFile;
+    use gpui_kit::test::{TestQueryExt, TestWindowExt};
     use gpui_kit::{
-        AnyWindowHandle, AppContext as _, Bounds, Entity, Focusable as _, TestAppContext,
+        AnyWindowHandle, AppContext as _, Bounds, Entity, Focusable as _, Role, TestAppContext,
         WindowBounds, WindowOptions, point, px, size,
     };
 
@@ -1601,6 +1852,7 @@ mod tests {
             },
             author: Author::default(),
             is_draft: false,
+            by_me: false,
             updated_at: String::new(),
             comments_count: 0,
         }
@@ -1714,5 +1966,69 @@ mod tests {
             assert_eq!(view.read(cx).state.filter, "web");
         })
         .unwrap();
+    }
+
+    /// The patch comes from `gh` in production; the test seeds one so the pane
+    /// can render without a network call.
+    const PATCH: &str = "diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,2 +1,2 @@
+-old line
++new line
+ unchanged
+";
+
+    #[gpui_kit::test]
+    fn the_diff_shortcut_shows_the_parsed_patch(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(bind_keys);
+        let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
+
+        // A seeded patch keeps the pane off the network.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                let url = view.state.selected_pr().unwrap().url.clone();
+                view.set_diff(&url, Ok(DiffFile::parse(PATCH).expect("patch parses")), cx);
+            });
+        });
+
+        cx.update_window(handle, |_, window, cx| {
+            focus_window(&view, window, cx);
+            window.press("cmd-2", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(view.tab, DetailTab::Diff);
+            assert!(
+                matches!(
+                    view.diffs.get("https://github.com/acme/api/pull/1"),
+                    Some(DiffView::Ready { files: 1, .. })
+                ),
+                "the parsed patch did not reach the viewer"
+            );
+        });
+
+        cx.update_window(handle, |_, window, cx| {
+            let tabs = window.find_all_by_role(Role::Tab);
+            assert_eq!(tabs.len(), 2, "the review and diff tabs are missing");
+            let diff = window.find_all_by_role(Role::Document);
+            let pane = diff
+                .first()
+                .expect("the diff viewer is not in the frame")
+                .bounds();
+            assert!(
+                pane.size.height > px(200.),
+                "the diff pane collapsed to {}px",
+                f32::from(pane.size.height)
+            );
+            window.press("cmd-1", cx);
+        })
+        .unwrap();
+
+        cx.update(|cx| assert_eq!(view.read(cx).tab, DetailTab::Review));
     }
 }

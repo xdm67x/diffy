@@ -251,6 +251,7 @@ mod tests {
             },
             author: Author::default(),
             is_draft: false,
+            by_me: false,
             updated_at: String::new(),
             comments_count: 0,
         }

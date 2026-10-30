@@ -13,6 +13,10 @@ pub struct PullRequest {
     pub author: Author,
     #[serde(default, rename = "isDraft")]
     pub is_draft: bool,
+    /// True when the queue found the PR through the author search, so the list
+    /// holds the user's own work beside the PRs waiting for their review.
+    #[serde(skip)]
+    pub by_me: bool,
     #[serde(default, rename = "updatedAt")]
     pub updated_at: String,
     #[serde(default, rename = "commentsCount")]
@@ -309,6 +313,7 @@ mod tests {
             },
             author: Author::default(),
             is_draft: false,
+            by_me: false,
             updated_at: String::new(),
             comments_count: 0,
         }
