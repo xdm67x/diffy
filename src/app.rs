@@ -1396,6 +1396,7 @@ impl Diffy {
         }
 
         let repos = self.repo_count();
+        let prs = self.pr_count();
 
         v_flex()
             .id("repos-panel")
@@ -1464,6 +1465,17 @@ impl Diffy {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_settings_dialog(window, cx)
                             })),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{prs} pull request{} · {repos} repo{}",
+                                plural(prs),
+                                plural(repos)
+                            )),
                     ),
             )
             // The seam between this panel and the PR list is the resize
@@ -1531,10 +1543,6 @@ impl Diffy {
             }
         }
 
-        let visible = self.state.prs.len();
-        let repo = self.state.selected_repo.clone().unwrap_or_default();
-        let prs = self.pr_count();
-        let repos = self.repo_count();
         let active = self.state.active.len();
 
         v_flex()
@@ -1545,52 +1553,37 @@ impl Diffy {
             .flex_shrink_0()
             .bg(cx.theme().sidebar)
             .child(
-                v_flex().px_3().pt_2().pb_3().child(
-                    Input::new(&self.filter)
-                        .id("pr-filter")
-                        .aria_label("Filter pull requests")
-                        .bordered(false)
-                        .cleanable(true)
-                        .prefix(Icon::new(IconName::Search).small())
-                        .suffix(
-                            div()
-                                .px_1p5()
-                                .py_0p5()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("⌘F"),
-                        ),
-                ),
-            )
-            .child(
                 h_flex()
-                    .px_4()
-                    .pt_1()
-                    .pb_1()
-                    .gap_2()
+                    .px_3()
+                    .pt_2()
+                    .pb_3()
                     .items_center()
                     .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().sidebar_foreground)
-                            .truncate()
-                            .child(repo),
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.filter)
+                                .id("pr-filter")
+                                .aria_label("Filter pull requests")
+                                .bordered(false)
+                                .cleanable(true)
+                                .prefix(Icon::new(IconName::Search).small())
+                                .suffix(
+                                    div()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("⌘F"),
+                                ),
+                        ),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(visible.to_string()),
-                    )
-                    .child(div().flex_1())
                     .child(
                         Button::new("refresh")
                             .ghost()
                             .small()
+                            .ml_2()
                             .icon(IconName::RefreshCw)
                             .tooltip("Reload pull requests (⌘R)")
                             .loading(self.loading)
@@ -1599,39 +1592,27 @@ impl Diffy {
                     ),
             )
             .child(list)
-            .child(
-                h_flex()
-                    .h_9()
-                    .flex_shrink_0()
-                    .px_4()
-                    .gap_2()
-                    .items_center()
-                    .border_t_1()
-                    .border_color(cx.theme().sidebar_border)
-                    .child(div().flex_1())
-                    .when(active > 0, |this| {
-                        this.child(
+            .when(active > 0, |this| {
+                this.child(
+                    h_flex()
+                        .h_9()
+                        .flex_shrink_0()
+                        .px_4()
+                        .gap_2()
+                        .items_center()
+                        .border_t_1()
+                        .border_color(cx.theme().sidebar_border)
+                        .child(div().flex_1())
+                        .child(
                             h_flex()
                                 .gap_2()
                                 .text_xs()
                                 .text_color(cx.theme().warning)
                                 .child(Spinner::new().small())
                                 .child(format!("{active} review{} running", plural(active))),
-                        )
-                    })
-                    .when(active == 0, |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!(
-                                    "{prs} pull request{} · {repos} repo{}",
-                                    plural(prs),
-                                    plural(repos)
-                                )),
-                        )
-                    }),
-            )
+                        ),
+                )
+            })
             // The seam between this panel and the detail is the resize
             // handle's own hairline.
             .child(self.panel_resize_handle(PanelKind::Prs, PRS_DEFAULT_WIDTH, cx))
