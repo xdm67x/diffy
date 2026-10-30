@@ -1,8 +1,14 @@
+// The mock feature answers the GitHub and Claude calls before the real code, so
+// the rest of those functions reads as unreachable in a mock build.
+#![cfg_attr(feature = "mock", allow(unreachable_code, unused_variables))]
+
 mod api;
 mod app;
 mod claude;
 mod exec;
 mod log;
+#[cfg(feature = "mock")]
+mod mock;
 mod models;
 mod review;
 mod state;

@@ -83,6 +83,8 @@ fn run(
     notify: &dyn Fn(Stage),
     progress: &(dyn Fn(String) + Sync),
 ) -> Result<ReviewReport> {
+    #[cfg(feature = "mock")]
+    return Ok(crate::mock::review(pr, notify, progress));
     let system_prompt = load_system_prompt()?;
 
     notify(Stage::FetchingDiff);

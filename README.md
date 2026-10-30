@@ -35,6 +35,17 @@ right-click **Diffy** and choose **Open**, or run
 cargo run --release
 ```
 
+### Try it without a GitHub account
+
+```sh
+cargo run --release --features mock
+```
+
+The `mock` feature answers every `gh` and `claude` call with fixtures from `src/mock.rs`:
+three PRs across two repos, their diffs, and a review that walks through the same stages as
+a real one. Posting a review is skipped and only logged. Neither `gh` nor Claude Code has to be
+installed or authenticated.
+
 The review system prompt is embedded in the binary at build time with `include_str!`, so a
 built Diffy does not need `SYSTEM_PROMPT.md` on disk. Set `DIFFY_SYSTEM_PROMPT` to a file
 path to override the embedded prompt at runtime.

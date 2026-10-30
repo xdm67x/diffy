@@ -12,6 +12,8 @@ const PR_FIELDS: &str = "number,title,url,body,repository,author,isDraft,updated
 /// Teams come from `~/.diffy/settings.json` (`{"teams": ["acme/backend"]}`),
 /// falling back to the comma-separated `DIFFY_TEAMS` variable.
 pub fn get_prs() -> Result<Vec<PullRequest>> {
+    #[cfg(feature = "mock")]
+    return Ok(crate::mock::prs());
     let mut targets = vec!["@me".to_string()];
     targets.extend(targets_from_teams(configured_teams()?));
     targets.dedup();
@@ -99,6 +101,11 @@ pub fn submit_review(
     body: &str,
     report: &ReviewReport,
 ) -> Result<()> {
+    #[cfg(feature = "mock")]
+    {
+        crate::log::info(format!("mock mode: not posting {action:?} to {}", pr.url));
+        return Ok(());
+    }
     let mut child = crate::exec::command("gh")
         .args(["pr", "review", &pr.url, action.flag(), "--body-file", "-"])
         .stdin(Stdio::piped())
@@ -160,6 +167,8 @@ fn post_suggestions(pr: &PullRequest, report: &ReviewReport) {
 }
 
 pub fn fetch_diff(pr: &PullRequest) -> Result<String> {
+    #[cfg(feature = "mock")]
+    return Ok(crate::mock::diff(pr));
     let output = crate::exec::command("gh")
         .args(["pr", "diff", &pr.url])
         .output()

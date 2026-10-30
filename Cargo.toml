@@ -9,5 +9,10 @@ color-eyre = "0.6.5"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
+[features]
+# Answers every `gh` and `claude` call with fixtures from `src/mock.rs` so the
+# app can be tried without a GitHub account or Claude Code.
+mock = []
+
 [dev-dependencies]
 gpui-kit = { version = "0.8.1", features = ["test-support"] }
