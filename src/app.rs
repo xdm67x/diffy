@@ -610,10 +610,15 @@ impl Diffy {
             }
             let title = this.read(cx).panel_title(cx);
             let body = this.read(cx).panel_body(&weak, &panel_focus, cx);
+            // The panel never grows wider than the main panel it slides over;
+            // the builder re-runs on every redraw, so the cap follows window
+            // resizes and side-panel drags.
+            let max_width = this.read(cx).main_panel_width(window);
             let close_weak = close_weak.clone();
             sheet
                 .title(title)
                 .size(DefiniteLength::Fraction(0.62))
+                .max_w(max_width)
                 .p_0()
                 // No dimming overlay: the panel slides in beside the review,
                 // which stays clickable, so selecting another PR swaps the
@@ -629,6 +634,12 @@ impl Diffy {
                 .child(body)
         });
         cx.notify();
+    }
+
+    /// The width of the main panel (the review): the window's content width
+    /// minus the two side panels. The diff panel caps at this width.
+    fn main_panel_width(&self, window: &Window) -> Pixels {
+        window.viewport_size().width - self.repos_panel_width - self.prs_panel_width
     }
 
     /// The sheet title: what the panel shows, that it is read-only, and how
@@ -3066,6 +3077,61 @@ mod tests {
         })
         .unwrap();
         cx.update(|cx| assert!(!view.read(cx).diff_panel_open));
+    }
+
+    /// The diff sheet caps at the main panel's current width: at 62% of the
+    /// 1100 px test window it would be 682 px wide, past the 660 px detail
+    /// panel (1100 - 200 repos - 240 prs), so the cap binds.
+    #[gpui_kit::test]
+    fn the_diff_panel_caps_its_width_at_the_main_panel_width(cx: &mut TestAppContext) {
+        // Keep the persisted settings out of the real ~/.diffy.
+        let home = std::env::temp_dir().join(format!("diffy-cap-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe { std::env::set_var("DIFFY_HOME", &home) };
+
+        cx.update(gpui_kit::init);
+        cx.update(bind_keys);
+        let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
+        cx.update(|cx| seed_patch(&view, cx));
+
+        cx.update_window(handle, |_, window, cx| {
+            focus_window(&view, window, cx);
+            window.press("cmd-2", cx);
+            // A few frames, so the slide-in animation settles before the
+            // sheet's bounds are measured.
+            for _ in 0..10 {
+                window.render_frame(cx);
+            }
+        })
+        .unwrap();
+
+        cx.update_window(handle, |_, window, cx| {
+            assert!(window.has_active_sheet(cx), "the sliding panel is not open");
+            let main = px(1100.) - REPOS_DEFAULT_WIDTH - PRS_DEFAULT_WIDTH;
+            assert!(
+                main < px(1100.) * 0.62,
+                "the test window is too wide for the cap to bind"
+            );
+            let sheet = window
+                .elements()
+                .into_iter()
+                .find(|element| {
+                    element.path().last()
+                        == Some(&gpui_kit::ElementId::Name("sheet-content".into()))
+                })
+                .expect("the diff sheet is not in the frame");
+            let width = sheet.bounds().size.width;
+            assert_eq!(
+                width,
+                main,
+                "the sheet should cap at the {}px main panel",
+                f32::from(main),
+            );
+        })
+        .unwrap();
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// Hovering a line surfaces the read-only "Ask to agent" action under it,

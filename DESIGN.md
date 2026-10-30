@@ -43,7 +43,8 @@ the middle, the selected PR's review on the right.
   history. The status bar at the bottom shows the selection position, the shortcut hints, and
   transient notices.
 - **The diff is an overlay, not a fourth panel.** `Diff` (⌘2) slides a read-only,
-  syntax-highlighted patch in from the right as a sheet at 62% of the window width, without
+  syntax-highlighted patch in from the right as a sheet at 62% of the window width, capped
+  at the current width of the detail panel (the window minus the two side panels), without
   dimming the review, so selecting another PR swaps the patch in place. It carries a
   per-line "Ask to agent" affordance whose answers render as cards on the line.
 
