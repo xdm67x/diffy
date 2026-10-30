@@ -1396,7 +1396,6 @@ impl Diffy {
         }
 
         let repos = self.repo_count();
-        let prs = self.pr_count();
 
         v_flex()
             .id("repos-panel")
@@ -1465,13 +1464,6 @@ impl Diffy {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_settings_dialog(window, cx)
                             })),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("{prs} pull request{}", plural(prs))),
                     ),
             )
             // The seam between this panel and the PR list is the resize
