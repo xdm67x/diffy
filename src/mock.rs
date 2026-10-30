@@ -2,6 +2,7 @@
 //! Built only with `--features mock`; every `gh` and `claude` call is then
 //! answered from here.
 
+use crate::ask::AskRequest;
 use crate::models::{Author, Finding, PullRequest, Repository, ReviewReport, Verdict};
 use crate::review::Stage;
 use crate::time;
@@ -286,6 +287,22 @@ pub fn review(
     }
 }
 
+/// The fixture answer to an "ask to agent" question about one diff line. Like a
+/// real ask session it only reads: it echoes the line and the question.
+pub fn ask_answer(request: &AskRequest) -> String {
+    pause(600);
+    let code = request.code.as_deref().map(str::trim).unwrap_or("");
+    format!(
+        "On `{path}:{line}` ({side} side) the code is `{code}`. You asked: {question} \
+         (fixture answer; a real run answers from the diff in a read-only session).",
+        path = request.path,
+        line = request.line,
+        side = request.side.label(),
+        code = code,
+        question = request.question.trim(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +326,25 @@ mod tests {
             assert!(time::parse_utc(&pr.updated_at).is_some(), "{}", pr.url);
             assert!(prs[index + 1..].iter().all(|other| other.url != pr.url));
         }
+    }
+
+    #[test]
+    fn the_fixture_answer_names_the_line_and_echoes_the_question() {
+        let pr = prs().into_iter().next().unwrap();
+        let patch = diff(&pr);
+        let request = AskRequest {
+            pr,
+            diff: patch,
+            path: "src/checkout/pay.rs".to_string(),
+            side: crate::ask::AskSide::Modified,
+            line: 41,
+            code: Some("        let mut attempts = 0;".to_string()),
+            question: "why retry here?".to_string(),
+        };
+        let answer = ask_answer(&request);
+        assert!(answer.contains("src/checkout/pay.rs:41"));
+        assert!(answer.contains("why retry here?"));
+        assert!(answer.contains("read-only"));
     }
 
     #[test]

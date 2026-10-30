@@ -7,7 +7,7 @@ use std::env;
 use std::fs;
 use std::thread;
 
-const MAX_DIFF_CHARS: usize = 120_000;
+pub(crate) const MAX_DIFF_CHARS: usize = 120_000;
 
 /// Bundled so the review protocol travels with the binary.
 const SYSTEM_PROMPT: &str = include_str!("../SYSTEM_PROMPT.md");
@@ -434,7 +434,7 @@ fn words(text: &str) -> HashSet<String> {
         .collect()
 }
 
-fn truncate_utf8(text: &str, max_bytes: usize) -> (&str, bool) {
+pub(crate) fn truncate_utf8(text: &str, max_bytes: usize) -> (&str, bool) {
     if text.len() <= max_bytes {
         return (text, false);
     }

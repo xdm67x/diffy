@@ -4,9 +4,10 @@ Diffy is a desktop app for reviewing the pull requests that are waiting on **you
 It finds the open PRs where you (or your team) are requested as a reviewer, plus the open
 PRs you wrote yourself, groups them by repository, and runs a two-reviewer + judge AI review
 for the PR you select. Several PRs can be reviewed at the same time, each run is kept in that
-PR's review history so you can run it again after new commits and compare, you can read the
-PR's diff beside the review, and you can post a review to GitHub as an approval, a request
-for changes, or a comment.
+PR's review history so you can run it again after new commits and compare, you can slide the
+PR's diff in from the right as a read-only, syntax-highlighted panel and ask Claude about any
+line of it, and you can post a review to GitHub as an approval, a request for changes, or a
+comment.
 
 The review list lives in an always-open sidebar beside the review. The interface is built with
 [GPUI](https://gpui.rs/) and [GPUI Kit](https://gpui-kit.com/).
@@ -42,9 +43,9 @@ cargo run --release --features mock
 ```
 
 The `mock` feature answers every `gh` and `claude` call with fixtures from `src/mock.rs`:
-three PRs across two repos, their diffs, and a review that walks through the same stages as
-a real one. Posting a review is skipped and only logged. Neither `gh` nor Claude Code has to be
-installed or authenticated.
+three PRs across two repos, their diffs, a review that walks through the same stages as
+a real one, and an answer for every "ask to agent" question. Posting a review is skipped and
+only logged. Neither `gh` nor Claude Code has to be installed or authenticated.
 
 The review system prompt is embedded in the binary at build time with `include_str!`, so a
 built Diffy does not need `SYSTEM_PROMPT.md` on disk. Set `DIFFY_SYSTEM_PROMPT` to a file
@@ -80,18 +81,30 @@ is marked **out of date**, so you know to run the review again before posting it
 shows the total pull requests and repositories, or the reviews running right now.
 
 The review pane has a fixed header with the PR title, author, age, comment count, a **Yours**
-tag on the PRs you wrote, a link to GitHub, and the review actions. Under it, the **Review**
-and **Diff** tabs switch the pane between two bodies.
+tag on the PRs you wrote, a link to GitHub, the review actions, and a **Diff** button. The pane
+itself always shows the review, because that is what you opened the PR for: the verdict, the
+intent, the summary, the findings worst severity first, and the findings the judge filtered
+out. The PR description follows below as context.
 
-**Review** leads with the review, because that is what you opened the PR for: the verdict,
-the intent, the summary, the findings worst severity first, and the findings the judge
-filtered out. The PR description follows below as context.
+**Diff** slides in from the right as a panel beside the review, which stays clickable: the
+PR's patch, read-only and syntax-highlighted — every changed file, with its hunk headers,
+line numbers, and added and removed lines, in one virtualized list that scrolls on its own and
+expands folded context on click. The panel is marked **Read-only** in its title, and it is
+resizable. Selecting another PR swaps the patch the panel shows. The patch is fetched the
+first time the panel opens for a PR and kept per PR until the next refresh, so returning to a
+PR costs nothing. A failed fetch says why and offers **Try again**. `Esc`, the panel's close
+button, or `⌘2` slides it away.
 
-**Diff** is the PR's patch: every changed file, with its hunk headers, line numbers, and
-added and removed lines, in one virtualized list that scrolls on its own and expands folded
-context on click. The diff is fetched the first time you open the tab and kept per PR until
-the next refresh, so returning to a PR costs nothing. A failed fetch says why and offers
-**Try again**.
+Hovering a line shows a **+** inside the line row (like an inline review comment); clicking it,
+or the panel header's **Ask to agent…** button (which targets the hovered line), opens a dialog
+that names the line (`path:line`), shows the line's code, and takes your question. On **Ask**,
+Diffy creates a task for that line and starts a headless Claude session that answers the
+question **in read-only mode**: the session is granted only the `Read`, `Glob`, and `Grep`
+tools — no `Bash` at all — so it cannot run `gh` or `git` and can never write to the PR, and
+nothing it answers is posted anywhere. The task appears as a compact card under the line with
+a spinner while it runs, then the answer (selectable markdown, capped in height), or the error
+with **Retry**. Several asks can run at once, one per line; tasks are kept per PR until the
+next refresh.
 
 The status bar at the bottom of the review pane shows your place in the list, the shortcut
 summary, and the last error or success message.
@@ -104,16 +117,15 @@ inside the field focuses it.
 
 | Key | Action |
 | --- | --- |
-| `⌘1` | Show the review |
-| `⌘2` | Show the diff |
+| `⌘2` | Slide the diff panel in or away |
 | `⌘F` | Focus the PR filter |
 | `⌘R` | Refresh the PR list from GitHub |
-| `Esc` | Leave the filter |
+| `Esc` | Leave the filter, or close the diff panel |
 
-Selection, running a review, stepping through review history, switching tabs, and submitting
-a review are done with the window controls: click a PR row, use the **Run review** button,
-the review history arrows, the **Review** / **Diff** tabs, and the
-**Comment** / **Request changes** / **Approve** buttons.
+Selection, running a review, stepping through review history, and submitting a review are
+done with the window controls: click a PR row, use the **Run review** button, the review
+history arrows, the **Diff** button, and the **Comment** / **Request changes** / **Approve**
+buttons.
 
 Posting uses the buttons in the review header: **Comment**, **Request changes**, and
 **Approve**. Each one opens a dialog naming the PR with the review body in an editable text
@@ -121,8 +133,9 @@ field, and nothing is posted before you confirm. They are disabled while a post 
 and while no finished review is shown. On a PR you wrote, GitHub refuses an approval and a
 change request of your own work, so only **Comment** is offered there.
 
-With the mouse you can click a PR to select it, scroll the PR list or the review pane, switch
-between the review and the diff, use the refresh button in the **Pull requests** header.
+With the mouse you can click a PR to select it, scroll the PR list or the review pane, hover a
+diff line and use **Ask to agent…**, resize or close the diff panel, and use the refresh button
+in the **Pull requests** header.
 
 The filter only hides rows. Every fetched PR stays loaded, so clearing the filter brings
 all of your pull requests back, and the selection follows a PR by its url rather than its
@@ -254,7 +267,8 @@ the reviewers that they are seeing a partial diff and that they can fetch the re
 
 The selected PR's title, description, author, diff, and any repository files a reviewer
 chooses to read are sent to Anthropic through the Claude Code CLI. A posted review sends the
-report text to GitHub.
+report text to GitHub. An "ask to agent" question sends the PR metadata, the full diff, and
+the selected line with your question.
 
 Claude runs commands as your user. The allowlist and system prompt reduce accidental
 writes (temporary clones only, no builds or tests), but this is **not a sandbox or a
@@ -262,17 +276,22 @@ security boundary**. PR content is untrusted and may contain prompt injection. O
 PRs you trust, or run Diffy inside a container or VM with credentials scoped to read-only
 access.
 
+The "ask to agent" sessions are stricter than the reviewers: they are granted no `Bash` tool
+at all (`--tools Read,Glob,Grep`), so they cannot execute any command and cannot touch the PR
+with write access. Their answers are shown in Diffy only and are never posted.
+
 ## Project layout
 
 ```
 src/
   main.rs                    bootstrap, window options, key bindings
-  app.rs                     GPUI view: sidebar, review and diff panes, actions, posting dialog
+  app.rs                     GPUI view: sidebar, review pane, diff side panel, ask-to-agent, posting dialog
+  ask.rs                     read-only "ask to agent" sessions about one diff line
   state.rs                   PR list, filter, selection, review history (no UI types)
   api.rs                     gh search / gh pr diff / gh pr review
   models.rs                  PRs, findings, verdicts, repo grouping
   review.rs                  reviewer council, finding matching, judge
-  claude.rs                  headless Claude invocation, reviewer agent, JSON extraction
+  claude.rs                  headless Claude invocation (reviewer and read-only), JSON extraction
   store.rs                   ~/.diffy settings and saved review log
   log.rs                     ~/.diffy/logs, one file per UTC day
 SYSTEM_PROMPT.md             system prompt for reviewers and judge, embedded at build time

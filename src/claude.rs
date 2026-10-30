@@ -14,6 +14,35 @@ pub fn run(system_prompt: &str, prompt: &str, progress: &(dyn Fn(&str) + Sync)) 
     execute(base_command(system_prompt), prompt, progress)
 }
 
+/// Runs one strictly read-only headless Claude session, for "ask to agent"
+/// questions about a diff line. `Bash` is not among the tools at all, so the
+/// session cannot run `gh`, `git`, or anything else that could touch the PR:
+/// only the read-only file tools are granted and everything else is denied.
+pub fn run_readonly(
+    system_prompt: &str,
+    prompt: &str,
+    progress: &(dyn Fn(&str) + Sync),
+) -> Result<String> {
+    execute(readonly_command(system_prompt), prompt, progress)
+}
+
+/// The read-only counterpart of [`base_command`]: same flags, but `--tools`
+/// is limited to `Read,Glob,Grep` and no `Bash(...)` rule exists, so no
+/// command can be executed — write access to the PR is impossible.
+fn readonly_command(system_prompt: &str) -> Command {
+    let mut command = crate::exec::command("claude");
+    command
+        .arg("--print")
+        .args(["--model", "opus"])
+        .arg("--no-session-persistence")
+        .args(["--permission-mode", "dontAsk"])
+        .args(["--tools", "Read,Glob,Grep"])
+        .arg("--allowedTools")
+        .args(["Read", "Glob", "Grep"])
+        .args(["--system-prompt", system_prompt]);
+    command
+}
+
 fn base_command(system_prompt: &str) -> Command {
     let mut command = crate::exec::command("claude");
     command
@@ -228,6 +257,23 @@ mod tests {
             .is_none()
         );
         assert!(progress_label(r#"{"type":"user"}"#).is_none());
+    }
+
+    #[test]
+    fn the_readonly_session_grants_no_bash_and_no_write_tools() {
+        let debug = format!("{:?}", readonly_command("system prompt"));
+        assert!(
+            debug.contains("\"--tools\" \"Read,Glob,Grep\""),
+            "read-only session must limit tools: {debug}"
+        );
+        assert!(
+            debug.contains("\"--permission-mode\" \"dontAsk\""),
+            "read-only session must deny instead of prompting: {debug}"
+        );
+        assert!(
+            !debug.contains("Bash"),
+            "the read-only session must not grant Bash, so it cannot touch the PR: {debug}"
+        );
     }
 
     #[test]

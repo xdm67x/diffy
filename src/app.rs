@@ -1,4 +1,5 @@
 use crate::api::{self, ReviewAction};
+use crate::ask::{self, AskEvent, AskSide, AskStatus, AskTask};
 use crate::log;
 use crate::models::{Finding, PullRequest, ReviewReport, Verdict};
 use crate::review::ReviewEvent;
@@ -9,7 +10,9 @@ use crate::time;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt,
     button::{Button, ButtonVariant, ButtonVariants},
-    diff::{Diff, DiffFile, DiffState},
+    diff::{
+        Diff, DiffAnnotation, DiffFile, DiffHoverHighlight, DiffLinePosition, DiffSide, DiffState,
+    },
     h_flex,
     input::{Escape as InputEscape, Input, InputEvent, InputState, Textarea, TextareaState},
     link::Link,
@@ -17,13 +20,13 @@ use gpui_kit::component::{
     scroll::ScrollableElement,
     spinner::Spinner,
     status_bar::StatusBar,
-    tab::{Tab, TabBar},
     tag::Tag,
     text::TextView,
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -32,40 +35,44 @@ const CONTEXT: &str = "Diffy";
 /// While the filter has focus, letter keys belong to the text field, so this
 /// context only keeps escape and the modifier shortcut for the sidebar.
 const FILTER_CONTEXT: &str = "DiffyFilter";
+/// The sliding diff panel owns this context while it has focus, so ⌘2 closes
+/// it again and Esc (bound in the sheet context) dismisses it.
+const PANEL_CONTEXT: &str = "DiffPanel";
 
 actions!(
     diffy,
-    [RefreshPrs, FocusFilter, LeaveFilter, ShowReview, ShowDiff]
+    [RefreshPrs, FocusFilter, LeaveFilter, ToggleDiffPanel]
 );
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-f", FocusFilter, Some(CONTEXT)),
         KeyBinding::new("cmd-r", RefreshPrs, Some(CONTEXT)),
-        KeyBinding::new("cmd-1", ShowReview, Some(CONTEXT)),
-        KeyBinding::new("cmd-2", ShowDiff, Some(CONTEXT)),
+        KeyBinding::new("cmd-2", ToggleDiffPanel, Some(CONTEXT)),
         KeyBinding::new("escape", LeaveFilter, Some(FILTER_CONTEXT)),
         KeyBinding::new("cmd-r", RefreshPrs, Some(FILTER_CONTEXT)),
-        KeyBinding::new("cmd-1", ShowReview, Some(FILTER_CONTEXT)),
-        KeyBinding::new("cmd-2", ShowDiff, Some(FILTER_CONTEXT)),
+        KeyBinding::new("cmd-2", ToggleDiffPanel, Some(FILTER_CONTEXT)),
+        KeyBinding::new("cmd-2", ToggleDiffPanel, Some(PANEL_CONTEXT)),
+        KeyBinding::new("cmd-2", ToggleDiffPanel, Some("Diff")),
     ]);
 }
 
-/// Which surface the review pane shows under the PR header.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DetailTab {
-    Review,
-    Diff,
+/// Events arriving from the background threads: reviews and read-only asks.
+enum Incoming {
+    Review(ReviewEvent),
+    Ask(AskEvent),
 }
 
-/// What the diff pane knows about the selected PR's patch.
+/// What the diff panel knows about the selected PR's patch.
 enum DiffView {
-    /// The request the pane is waiting for, so a fetch that a refresh or a
+    /// The request the panel is waiting for, so a fetch that a refresh or a
     /// retry replaced cannot install an older patch.
     Loading(u64),
     Ready {
         state: Entity<DiffState>,
         files: usize,
+        /// The raw patch, kept so a line's code can be quoted in an ask.
+        patch: String,
     },
     Failed(String),
 }
@@ -91,15 +98,23 @@ pub struct Diffy {
     loading: bool,
     posting: Option<ReviewAction>,
     notice: Option<Notice>,
-    /// The review pane's surface, kept across PRs and filtering.
-    tab: DetailTab,
+    /// Whether the read-only diff panel slides in from the right.
+    diff_panel_open: bool,
+    /// The diff line under the pointer in the panel. Sticky, so the "Ask to
+    /// agent" button stays reachable when the pointer moves onto it.
+    hovered: Option<DiffLinePosition>,
     /// Fetched patches, keyed by PR url and dropped on every refresh.
     diffs: HashMap<String, DiffView>,
     /// Counter behind the identity of each diff request.
     diff_requests: u64,
+    /// "Ask to agent" tasks, keyed by PR url and dropped on every refresh with
+    /// the diffs they refer to.
+    asks: HashMap<String, Vec<AskTask>>,
+    /// Counter behind the identity of each ask task.
+    ask_ids: u64,
     /// When each running review started, keyed by PR url.
     started: HashMap<String, Instant>,
-    events: Sender<ReviewEvent>,
+    events: Sender<Incoming>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -122,10 +137,10 @@ impl Diffy {
             );
 
         let (events, receiver) = mpsc::channel();
-        // Review threads report through a channel; drain it on the foreground
-        // thread so `State` is only touched from the UI thread.
+        // Review and ask threads report through a channel; drain it on the
+        // foreground thread so `State` is only touched from the UI thread.
         cx.spawn(async move |this, cx| {
-            let receiver: Receiver<ReviewEvent> = receiver;
+            let receiver: Receiver<Incoming> = receiver;
             loop {
                 let mut batch = Vec::new();
                 while let Ok(event) = receiver.try_recv() {
@@ -135,7 +150,7 @@ impl Diffy {
                     && this
                         .update(cx, |this, cx| {
                             for event in batch {
-                                this.apply(event, cx);
+                                this.apply_incoming(event, cx);
                             }
                         })
                         .is_err()
@@ -161,9 +176,12 @@ impl Diffy {
             loading: false,
             posting: None,
             notice: None,
-            tab: DetailTab::Review,
+            diff_panel_open: false,
+            hovered: None,
             diffs: HashMap::new(),
             diff_requests: 0,
+            asks: HashMap::new(),
+            ask_ids: 0,
             started: HashMap::new(),
             events,
             _subscriptions: vec![subscription],
@@ -212,6 +230,8 @@ impl Diffy {
                         // A PR that moved may have a new patch, so nothing
                         // fetched earlier is reused after a refresh.
                         this.diffs.clear();
+                        this.asks.clear();
+                        this.hovered = None;
                         this.state.set_prs(prs);
                         this.notice = Some(Notice {
                             text: "Updated just now".to_string(),
@@ -249,8 +269,15 @@ impl Diffy {
 
         let events = self.events.clone();
         crate::review::spawn(pr, move |event| {
-            let _ = events.send(event);
+            let _ = events.send(Incoming::Review(event));
         });
+    }
+
+    fn apply_incoming(&mut self, event: Incoming, cx: &mut Context<Self>) {
+        match event {
+            Incoming::Review(event) => self.apply(event, cx),
+            Incoming::Ask(event) => self.apply_ask(event, cx),
+        }
     }
 
     fn apply(&mut self, event: ReviewEvent, cx: &mut Context<Self>) {
@@ -313,29 +340,570 @@ impl Diffy {
     }
 
     /// Everything that follows a selection change, including the patch of the
-    /// PR the diff pane now shows.
+    /// PR the diff panel now shows when it is open.
     fn reset_selection_view(&mut self, cx: &mut Context<Self>) {
         self.reset_detail_scroll();
+        self.hovered = None;
         if let Some(row) = self.state.selected_row() {
             self.list_scroll.scroll_to_item(row);
         }
-        if self.tab == DetailTab::Diff {
+        if self.diff_panel_open {
             self.load_diff(cx);
         }
         cx.notify();
     }
 
-    fn show_tab(&mut self, tab: DetailTab, cx: &mut Context<Self>) {
-        if self.tab != tab {
-            self.tab = tab;
-            cx.notify();
-        }
-        if tab == DetailTab::Diff {
-            self.load_diff(cx);
+    fn on_toggle_diff_panel(
+        &mut self,
+        _: &ToggleDiffPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_diff_panel(window, cx);
+    }
+
+    /// One command behind the header button and ⌘2: the panel slides in from
+    /// the right when closed, and slides away when open.
+    fn toggle_diff_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_sheet(cx) {
+            self.close_diff_panel(window, cx);
+        } else {
+            if self.state.selected_pr().is_none() {
+                self.set_error("Select a pull request first.");
+                cx.notify();
+                return;
+            }
+            self.open_diff_panel(window, cx);
         }
     }
 
-    /// Fetches the patch the first time the diff pane shows this PR; the
+    fn close_diff_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.diff_panel_open = false;
+        self.hovered = None;
+        window.close_sheet(cx);
+        cx.notify();
+    }
+
+    /// Opens the selected PR's diff in a sliding right panel, read-only. The
+    /// sheet builder re-runs whenever the window redraws and reads the view
+    /// through a weak handle, so the panel always shows the current PR, patch,
+    /// and ask tasks.
+    fn open_diff_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.diff_panel_open {
+            return;
+        }
+        self.diff_panel_open = true;
+        self.load_diff(cx);
+        let weak = cx.entity().downgrade();
+        let close_weak = weak.clone();
+        let panel_focus = cx.focus_handle();
+        let initial_focus = Cell::new(true);
+        window.open_sheet(cx, move |sheet, window, cx| {
+            let Some(this) = weak.upgrade() else {
+                return sheet;
+            };
+            // Focus the panel body once per opening, so ⌘2 and Esc work while
+            // the panel is open; later rebuilds must not steal the focus.
+            if initial_focus.replace(false) {
+                window.focus(&panel_focus, cx);
+            }
+            let title = this.read(cx).panel_title(cx);
+            let body = this.read(cx).panel_body(&weak, &panel_focus, cx);
+            let close_weak = close_weak.clone();
+            sheet
+                .title(title)
+                .size(DefiniteLength::Fraction(0.62))
+                .p_0()
+                // No dimming overlay: the panel slides in beside the review,
+                // which stays clickable, so selecting another PR swaps the
+                // patch the panel shows.
+                .overlay(false)
+                .on_close(move |_, _, cx| {
+                    let _ = close_weak.update(cx, |this, cx| {
+                        this.diff_panel_open = false;
+                        this.hovered = None;
+                        cx.notify();
+                    });
+                })
+                .child(body)
+        });
+        cx.notify();
+    }
+
+    /// The sheet title: what the panel shows, that it is read-only, and how
+    /// many files the patch has.
+    fn panel_title(&self, cx: &App) -> impl IntoElement {
+        let files = self
+            .state
+            .selected_pr()
+            .and_then(|pr| match self.diffs.get(&pr.url) {
+                Some(DiffView::Ready { files, .. }) => {
+                    Some(format!("{files} file{}", plural(*files)))
+                }
+                _ => None,
+            });
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Diff"),
+            )
+            .child(Tag::new().small().child("Read-only"))
+            .child(div().flex_1())
+            .when_some(files, |this, files| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(files),
+                )
+            })
+    }
+
+    /// The sheet body: the PR identity and a hint, then the diff viewer with
+    /// its per-line ask affordance and the task cards. The body owns the panel
+    /// focus so the ⌘2 binding keeps working while the panel is open.
+    fn panel_body(
+        &self,
+        weak: &WeakEntity<Diffy>,
+        panel_focus: &FocusHandle,
+        cx: &App,
+    ) -> AnyElement {
+        let Some(pr) = self.state.selected_pr().cloned() else {
+            return v_flex().size_full().into_any_element();
+        };
+        let target = format!("{}#{}", pr.repo_name(), pr.number);
+        let body = match self.diffs.get(&pr.url) {
+            Some(DiffView::Ready { state, .. }) => self.diff_ready(&pr, state.clone(), weak, cx),
+            Some(DiffView::Failed(error)) => self.diff_failed(error.clone(), weak, cx),
+            Some(DiffView::Loading(_)) | None => v_flex()
+                .flex_1()
+                .min_h_0()
+                .justify_center()
+                .items_center()
+                .gap_3()
+                .child(Spinner::new().large())
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Loading the diff…"),
+                )
+                .into_any_element(),
+        };
+        let action_weak = weak.clone();
+        let ask_weak = weak.clone();
+        let ask_target = self.hovered.clone();
+        v_flex()
+            .id("diff-panel")
+            .track_focus(panel_focus)
+            .key_context(PANEL_CONTEXT)
+            .on_action(move |_: &ToggleDiffPanel, window, cx| {
+                let weak = action_weak.clone();
+                let _ = weak.update(cx, |this, cx| this.close_diff_panel(window, cx));
+            })
+            .size_full()
+            .child(
+                v_flex()
+                    .flex_shrink_0()
+                    .px_4()
+                    .pt_3()
+                    .pb_2()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(target),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(pr.title.clone()),
+                            )
+                            // The keyboard-reachable ask trigger; it acts on the
+                            // hovered line and costs no per-line space.
+                            .child(
+                                Button::new("ask-hovered-line")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Bot)
+                                    .label("Ask to agent…")
+                                    .tooltip(match &ask_target {
+                                        Some(pos) => format!(
+                                            "Ask Claude about {}:{} in a read-only session",
+                                            pos.path(),
+                                            pos.line()
+                                        ),
+                                        None => "Hover a diff line first".to_string(),
+                                    })
+                                    .disabled(ask_target.is_none())
+                                    .on_click(move |_, window, cx| {
+                                        let weak = ask_weak.clone();
+                                        let _ = weak.update(cx, |this, cx| {
+                                            if let Some(pos) = this.hovered.clone() {
+                                                this.open_ask_dialog(pos, window, cx);
+                                            }
+                                        });
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Hover a line and click + to ask about it. The session is read-only: it cannot touch this PR."),
+                    ),
+            )
+            .child(body)
+            .into_any_element()
+    }
+
+    /// The read-only, syntax-highlighted diff inside the panel, with the ask
+    /// button under the hovered line and a card under every line with tasks.
+    fn diff_ready(
+        &self,
+        pr: &PullRequest,
+        state: Entity<DiffState>,
+        weak: &WeakEntity<Diffy>,
+        _cx: &App,
+    ) -> AnyElement {
+        let annotations = self.ask_annotations(pr);
+        let hover_weak = weak.clone();
+        let annot_weak = weak.clone();
+        let add_weak = weak.clone();
+        div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(
+                Diff::new(&state)
+                    .syntax_highlight(true)
+                    .hover_highlight(DiffHoverHighlight::Both)
+                    .annotations(annotations)
+                    .render_annotation(move |annotation, _, cx| {
+                        render_panel_annotation(&annot_weak, annotation, cx)
+                    })
+                    // The per-line ask trigger lives inside the line row (the
+                    // "+" on hover), so it costs no extra vertical space.
+                    .on_add_annotation(move |range, window, cx| {
+                        let position = DiffLinePosition::new(
+                            range.path().clone(),
+                            range.side(),
+                            range.start(),
+                        );
+                        let weak = add_weak.clone();
+                        let _ =
+                            weak.update(cx, |this, cx| this.open_ask_dialog(position, window, cx));
+                    })
+                    .on_line_hover(move |pos, _, cx| {
+                        // Sticky: ignore the pointer leaving a line, so the
+                        // header's ask button keeps its target.
+                        if let Some(pos) = pos {
+                            let pos = pos.clone();
+                            let weak = hover_weak.clone();
+                            let _ = weak.update(cx, |this, cx| {
+                                if this.hovered.as_ref() != Some(&pos) {
+                                    this.hovered = Some(pos);
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// The annotations the diff viewer shows: one card per task on its line.
+    fn ask_annotations(&self, pr: &PullRequest) -> Vec<DiffAnnotation> {
+        let mut annotations = Vec::new();
+        if let Some(tasks) = self.asks.get(&pr.url) {
+            for task in tasks {
+                annotations.push(DiffAnnotation::line(
+                    ElementId::Name(format!("task-{}", task.id).into()),
+                    DiffLinePosition::new(task.path.clone(), diff_side(task.side), task.line),
+                ));
+            }
+        }
+        annotations
+    }
+
+    /// The code of one line of the shown patch, for quoting in an ask.
+    fn line_code(&self, url: &str, position: &DiffLinePosition) -> Option<String> {
+        let patch = match self.diffs.get(url)? {
+            DiffView::Ready { patch, .. } => patch,
+            _ => return None,
+        };
+        ask::line_code(
+            patch,
+            position.path(),
+            ask_side(position.side()),
+            position.line(),
+        )
+    }
+
+    /// The question dialog for one diff line. It only collects the question;
+    /// the read-only session is spawned when the dialog is confirmed.
+    fn open_ask_dialog(
+        &mut self,
+        position: DiffLinePosition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pr) = self.state.selected_pr().cloned() else {
+            return;
+        };
+        let code = self.line_code(&pr.url, &position);
+        let location = format!("{}:{}", position.path(), position.line());
+        let editor = cx.new(|cx| {
+            let mut state = TextareaState::new(window, cx);
+            state.set_placeholder("Ask about this line…", window, cx);
+            state.set_auto_grow(3, 10, cx);
+            state
+        });
+        let this = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let this = this.clone();
+            let pr = pr.clone();
+            let position = position.clone();
+            let code = code.clone();
+            let editor = editor.clone();
+            let location = location.clone();
+            dialog
+                .title(format!("Ask about {location}"))
+                .content({
+                    let editor = editor.clone();
+                    let pr = pr.clone();
+                    let code = code.clone();
+                    move |content, _, cx| {
+                        let target = format!("{}#{}", pr.repo_name(), pr.number);
+                        content.child(
+                            v_flex()
+                                .gap_2()
+                                .p_4()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "Claude answers in a read-only session: it cannot run commands, and nothing is posted to {target}."
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .p_2()
+                                        .rounded_md()
+                                        .bg(cx.theme().muted)
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_xs()
+                                        .child(match &code {
+                                            Some(code) => code.trim_end().to_string(),
+                                            None => {
+                                                "(the line is not part of the visible patch)"
+                                                    .to_string()
+                                            }
+                                        }),
+                                )
+                                .child(
+                                    Textarea::new(&editor)
+                                        .aria_label("Your question")
+                                        .min_h(px(72.)),
+                                ),
+                        )
+                    }
+                })
+                .confirm()
+                .ok_text("Ask")
+                .cancel_text("Cancel")
+                .on_ok(move |_, _, cx| {
+                    let question = editor.read(cx).value().to_string();
+                    let this = this.clone();
+                    let pr = pr.clone();
+                    let position = position.clone();
+                    let code = code.clone();
+                    let _ = this.update(cx, |this, cx| {
+                        this.submit_ask(pr, position, code, question, cx)
+                    });
+                    true
+                })
+        });
+    }
+
+    /// Creates the task for a line question and starts the read-only session.
+    /// The task shows under the line in the panel while it runs and after it
+    /// finishes; nothing here writes to the PR.
+    fn submit_ask(
+        &mut self,
+        pr: PullRequest,
+        position: DiffLinePosition,
+        code: Option<String>,
+        question: String,
+        cx: &mut Context<Self>,
+    ) {
+        let question = question.trim().to_string();
+        if question.is_empty() {
+            self.set_error("Type a question about this line first.");
+            cx.notify();
+            return;
+        }
+        let Some(patch) = self.diffs.get(&pr.url).and_then(|view| match view {
+            DiffView::Ready { patch, .. } => Some(patch.clone()),
+            _ => None,
+        }) else {
+            self.set_error("The diff is still loading; try again in a moment.");
+            cx.notify();
+            return;
+        };
+        self.ask_ids += 1;
+        let id = self.ask_ids;
+        let side = ask_side(position.side());
+        let task = AskTask {
+            id,
+            path: position.path().to_string(),
+            side,
+            line: position.line(),
+            code: code.or_else(|| ask::line_code(&patch, position.path(), side, position.line())),
+            question: question.clone(),
+            progress: String::new(),
+            status: AskStatus::Running,
+        };
+        log::info(format!(
+            "{}: ask #{id} about {}:{}",
+            pr.url, task.path, task.line
+        ));
+        self.asks
+            .entry(pr.url.clone())
+            .or_default()
+            .push(task.clone());
+        self.notice = Some(Notice {
+            text: format!(
+                "Asking Claude about {}:{} (read-only)…",
+                task.path, task.line
+            ),
+            tone: Tone::Info,
+        });
+        let events = self.events.clone();
+        let request = ask::AskRequest {
+            pr,
+            diff: patch,
+            path: task.path.clone(),
+            side: task.side,
+            line: task.line,
+            code: task.code.clone(),
+            question,
+        };
+        ask::spawn(id, request, move |event| {
+            let _ = events.send(Incoming::Ask(event));
+        });
+        cx.notify();
+    }
+
+    /// Runs a failed task again with the same line and question.
+    fn retry_ask(&mut self, url: &str, id: u64, cx: &mut Context<Self>) {
+        let Some(pr) = self.state.prs.iter().find(|pr| pr.url == url).cloned() else {
+            return;
+        };
+        let Some(task) = self
+            .asks
+            .get(url)
+            .and_then(|tasks| tasks.iter().find(|task| task.id == id))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(patch) = self.diffs.get(url).and_then(|view| match view {
+            DiffView::Ready { patch, .. } => Some(patch.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        if let Some(task) = self
+            .asks
+            .get_mut(url)
+            .and_then(|tasks| tasks.iter_mut().find(|task| task.id == id))
+        {
+            task.status = AskStatus::Running;
+            task.progress.clear();
+        }
+        let events = self.events.clone();
+        let request = ask::AskRequest {
+            pr,
+            diff: patch,
+            path: task.path,
+            side: task.side,
+            line: task.line,
+            code: task.code,
+            question: task.question,
+        };
+        ask::spawn(id, request, move |event| {
+            let _ = events.send(Incoming::Ask(event));
+        });
+        cx.notify();
+    }
+
+    fn ask_task_mut(&mut self, url: &str, id: u64) -> Option<&mut AskTask> {
+        self.asks
+            .get_mut(url)?
+            .iter_mut()
+            .find(|task| task.id == id)
+    }
+
+    /// Applies one ask event to the task it belongs to and to the status bar.
+    fn apply_ask(&mut self, event: AskEvent, cx: &mut Context<Self>) {
+        match &event {
+            AskEvent::Progress { url, id, text } => {
+                log::info(format!("{url}: ask #{id} · {text}"));
+            }
+            AskEvent::Done { url, id, answer } => {
+                log::info(format!(
+                    "{url}: ask #{id} answered ({} chars)",
+                    answer.len()
+                ));
+            }
+            AskEvent::Failed { url, id, error } => {
+                log::error(format!("{url}: ask #{id} failed: {error}"));
+            }
+        }
+        match event {
+            AskEvent::Progress { url, id, text } => {
+                if let Some(task) = self.ask_task_mut(&url, id) {
+                    task.progress = text;
+                }
+            }
+            AskEvent::Done { url, id, answer } => {
+                if let Some(task) = self.ask_task_mut(&url, id) {
+                    task.status = AskStatus::Done(answer);
+                }
+                self.notice = Some(Notice {
+                    text: format!("Answered the question on {}.", self.state.label(&url)),
+                    tone: Tone::Success,
+                });
+            }
+            AskEvent::Failed { url, id, error } => {
+                if let Some(task) = self.ask_task_mut(&url, id) {
+                    task.status = AskStatus::Failed(error.clone());
+                }
+                self.set_error(format!(
+                    "The ask on {} failed: {error}",
+                    self.state.label(&url)
+                ));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Fetches the patch the first time the diff panel shows this PR; the
     /// result is kept by PR url until the next refresh.
     fn load_diff(&mut self, cx: &mut Context<Self>) {
         let Some(pr) = self.state.selected_pr().cloned() else {
@@ -358,17 +926,19 @@ impl Diffy {
                 if !this.diff_is_pending(&url, request) {
                     return;
                 }
-                let patch = match result {
-                    Ok(patch) => DiffFile::parse(&patch).map_err(|error| error.to_string()),
-                    Err(error) => Err(format!("{error:#}")),
-                };
-                this.set_diff(&url, patch, cx);
+                match result {
+                    Ok(patch) => {
+                        let parsed = DiffFile::parse(&patch).map_err(|error| error.to_string());
+                        this.set_diff(&url, patch, parsed, cx);
+                    }
+                    Err(error) => this.set_diff(&url, String::new(), Err(format!("{error:#}")), cx),
+                }
             });
         })
         .detach();
     }
 
-    /// True while the pane still waits for this fetch. A refresh or a retry
+    /// True while the panel still waits for this fetch. A refresh or a retry
     /// replaces the request, and the older patch must not install over it.
     fn diff_is_pending(&self, url: &str, request: u64) -> bool {
         matches!(self.diffs.get(url), Some(DiffView::Loading(current)) if *current == request)
@@ -379,10 +949,11 @@ impl Diffy {
     fn set_diff(
         &mut self,
         url: &str,
-        patch: Result<Vec<DiffFile>, String>,
+        patch: String,
+        parsed: Result<Vec<DiffFile>, String>,
         cx: &mut Context<Self>,
     ) {
-        let view = match patch {
+        let view = match parsed {
             Ok(changes) if changes.is_empty() => {
                 DiffView::Failed("This pull request has no file changes to show.".to_string())
             }
@@ -391,6 +962,7 @@ impl Diffy {
                 DiffView::Ready {
                     state: cx.new(|cx| DiffState::new(changes, cx)),
                     files,
+                    patch,
                 }
             }
             Err(error) => {
@@ -559,14 +1131,6 @@ impl Diffy {
 
     fn on_refresh(&mut self, _: &RefreshPrs, _: &mut Window, cx: &mut Context<Self>) {
         self.refresh(cx);
-    }
-
-    fn on_show_review(&mut self, _: &ShowReview, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_tab(DetailTab::Review, cx);
-    }
-
-    fn on_show_diff(&mut self, _: &ShowDiff, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_tab(DetailTab::Diff, cx);
     }
 
     fn on_focus_filter(&mut self, _: &FocusFilter, window: &mut Window, cx: &mut Context<Self>) {
@@ -913,16 +1477,12 @@ impl Diffy {
                 .child(self.empty_detail(cx));
         };
         let history_len = self.state.review_history(&pr).len();
-        let body = match self.tab {
-            DetailTab::Review => self.review_body(&pr, cx),
-            DetailTab::Diff => self.diff_body(&pr, cx),
-        };
         v_flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .child(self.detail_header(&pr, history_len, cx))
-            .child(body)
+            .child(self.review_body(&pr, cx))
     }
 
     fn review_body(&mut self, pr: &PullRequest, cx: &mut Context<Self>) -> AnyElement {
@@ -945,35 +1505,9 @@ impl Diffy {
             .into_any_element()
     }
 
-    /// The diff pane. The viewer owns its own scrolling, so it takes the whole
-    /// pane under the header instead of living inside the review scroll.
-    fn diff_body(&mut self, pr: &PullRequest, cx: &mut Context<Self>) -> AnyElement {
-        match self.diffs.get(&pr.url) {
-            Some(DiffView::Ready { state, .. }) => div()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .child(Diff::new(state))
-                .into_any_element(),
-            Some(DiffView::Failed(error)) => self.diff_failed(error.clone(), cx),
-            Some(DiffView::Loading(_)) | None => v_flex()
-                .flex_1()
-                .min_h_0()
-                .justify_center()
-                .items_center()
-                .gap_3()
-                .child(Spinner::new().large())
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Loading the diff…"),
-                )
-                .into_any_element(),
-        }
-    }
-
-    fn diff_failed(&self, error: String, cx: &mut Context<Self>) -> AnyElement {
+    /// The panel's failure state for a patch that could not be loaded.
+    fn diff_failed(&self, error: String, weak: &WeakEntity<Diffy>, cx: &App) -> AnyElement {
+        let weak = weak.clone();
         v_flex()
             .flex_1()
             .min_h_0()
@@ -1004,7 +1538,10 @@ impl Diffy {
                 Button::new("retry-diff")
                     .label("Try again")
                     .outline()
-                    .on_click(cx.listener(|this, _, _, cx| this.retry_diff(cx))),
+                    .on_click(move |_, _, cx| {
+                        let weak = weak.clone();
+                        let _ = weak.update(cx, |this, cx| this.retry_diff(cx));
+                    }),
             )
             .into_any_element()
     }
@@ -1187,6 +1724,24 @@ impl Diffy {
                         .disabled(running)
                         .on_click(cx.listener(|this, _, _, cx| this.run_review(cx))),
                 )
+                .child(
+                    Button::new("toggle-diff-panel")
+                        .label(if self.diff_panel_open {
+                            "Hide diff"
+                        } else {
+                            "Diff"
+                        })
+                        .icon(if self.diff_panel_open {
+                            IconName::PanelRightClose
+                        } else {
+                            IconName::PanelRightOpen
+                        })
+                        .outline()
+                        .tooltip("Show the PR diff in a side panel, read-only (⌘2)")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_diff_panel(window, cx)),
+                        ),
+                )
                 .when(!running && done, |this| {
                     this.child(div().flex_1())
                         .child(
@@ -1237,7 +1792,9 @@ impl Diffy {
 
         v_flex()
             .flex_shrink_0()
-            .p_6()
+            .px_6()
+            .pt_2()
+            .pb_6()
             .bg(cx.theme().sidebar)
             .border_b_1()
             .border_color(cx.theme().sidebar_border)
@@ -1247,32 +1804,8 @@ impl Diffy {
                     .max_w(rems(40.))
                     .mx_auto()
                     .gap_3()
-                    .child(header)
-                    .child(self.detail_tabs(pr, cx)),
+                    .child(header),
             )
-    }
-
-    /// The review and diff switcher. The tab component activates from the
-    /// pointer only, so ⌘1 and ⌘2 give the same switch a keyboard path.
-    fn detail_tabs(&self, pr: &PullRequest, cx: &mut Context<Self>) -> impl IntoElement {
-        let diff_label = match self.diffs.get(&pr.url) {
-            Some(DiffView::Ready { files, .. }) => format!("Diff ({files})"),
-            _ => "Diff".to_string(),
-        };
-        TabBar::new("detail-tabs")
-            .segmented()
-            .small()
-            .selected_index(if self.tab == DetailTab::Diff { 1 } else { 0 })
-            .on_click(cx.listener(|this, index, _, cx| {
-                let tab = if *index == 1 {
-                    DetailTab::Diff
-                } else {
-                    DetailTab::Review
-                };
-                this.show_tab(tab, cx)
-            }))
-            .child(Tab::new().label("Review"))
-            .child(Tab::new().label(diff_label))
     }
 
     fn description(&mut self, pr: &PullRequest, cx: &Context<Self>) -> impl IntoElement {
@@ -1600,7 +2133,7 @@ impl Diffy {
     }
 
     fn status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let hints = "⌘1 review · ⌘2 diff · ⌘F filter · ⌘R refresh";
+        let hints = "⌘2 diff panel · ⌘F filter · ⌘R refresh";
         let position = self
             .state
             .prs
@@ -1663,8 +2196,7 @@ impl Render for Diffy {
             .on_action(cx.listener(Self::on_focus_filter))
             .on_action(cx.listener(Self::on_leave_filter))
             .on_action(cx.listener(Self::on_input_escape))
-            .on_action(cx.listener(Self::on_show_review))
-            .on_action(cx.listener(Self::on_show_diff))
+            .on_action(cx.listener(Self::on_toggle_diff_panel))
             .child(
                 h_flex()
                     .items_stretch()
@@ -1673,6 +2205,154 @@ impl Render for Diffy {
                     .child(self.main_pane(cx)),
             )
     }
+}
+
+fn ask_side(side: DiffSide) -> AskSide {
+    match side {
+        DiffSide::Original => AskSide::Original,
+        DiffSide::Modified => AskSide::Modified,
+    }
+}
+
+fn diff_side(side: AskSide) -> DiffSide {
+    match side {
+        AskSide::Original => DiffSide::Original,
+        AskSide::Modified => DiffSide::Modified,
+    }
+}
+
+/// Renders one annotation inside the diff panel: the task card for a
+/// `task-{id}` line.
+fn render_panel_annotation(
+    weak: &WeakEntity<Diffy>,
+    annotation: &DiffAnnotation,
+    cx: &App,
+) -> AnyElement {
+    let id = annotation.id().clone();
+    let task_id = match &id {
+        ElementId::Name(name) => name
+            .strip_prefix("task-")
+            .and_then(|rest| rest.parse::<u64>().ok()),
+        _ => None,
+    };
+    let Some(task_id) = task_id else {
+        return div().into_any_element();
+    };
+    let Some(this) = weak.upgrade() else {
+        return div().into_any_element();
+    };
+    let this = this.read(cx);
+    let Some(url) = this.state.selected.clone() else {
+        return div().into_any_element();
+    };
+    let Some(task) = this
+        .asks
+        .get(&url)
+        .and_then(|tasks| tasks.iter().find(|task| task.id == task_id).cloned())
+    else {
+        return div().into_any_element();
+    };
+    ask_task_card(&task, &url, weak, cx)
+}
+
+/// One ask task under its diff line, kept compact: a single header row with
+/// the question and the line identity, then the running state, a height-capped
+/// answer, or the failure with a retry.
+fn ask_task_card(task: &AskTask, url: &str, weak: &WeakEntity<Diffy>, cx: &App) -> AnyElement {
+    let status = match &task.status {
+        AskStatus::Running => h_flex()
+            .gap_1p5()
+            .items_center()
+            .child(Spinner::new().small().color(cx.theme().warning))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if task.progress.is_empty() {
+                        "Asking Claude (read-only)…".to_string()
+                    } else {
+                        format!("{} (read-only)", task.progress)
+                    }),
+            )
+            .into_any_element(),
+        AskStatus::Done(answer) => div()
+            .max_h(px(200.))
+            .overflow_y_scrollbar()
+            .child(
+                TextView::markdown(
+                    ElementId::Name(format!("ask-answer-{}", task.id).into()),
+                    answer.clone(),
+                )
+                .selectable(true),
+            )
+            .into_any_element(),
+        AskStatus::Failed(error) => {
+            let weak = weak.clone();
+            let url = url.to_string();
+            let id = task.id;
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .truncate()
+                        .child(error.clone()),
+                )
+                .child(
+                    Button::new(ElementId::Name(format!("retry-ask-{id}").into()))
+                        .ghost()
+                        .small()
+                        .icon(IconName::RotateCw)
+                        .label("Retry")
+                        .on_click(move |_, _, cx| {
+                            let weak = weak.clone();
+                            let url = url.clone();
+                            let _ = weak.update(cx, |this, cx| this.retry_ask(&url, id, cx));
+                        }),
+                )
+                .into_any_element()
+        }
+    };
+    v_flex()
+        .gap_1p5()
+        .child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .child(
+                    Icon::new(IconName::Bot)
+                        .xsmall()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .truncate()
+                        .child(task.question.clone()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!(
+                            "{}:{} · {}",
+                            task.path,
+                            task.line,
+                            task.side.label()
+                        )),
+                ),
+        )
+        .child(status)
+        .into_any_element()
 }
 
 fn section_title(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
@@ -1832,9 +2512,11 @@ fn plural(count: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{DetailTab, DiffView, Diffy, bind_keys};
+    use super::{DiffView, Diffy, bind_keys};
+    use crate::ask::{AskEvent, AskSide, AskStatus, AskTask};
     use crate::models::{Author, PullRequest, Repository};
-    use gpui_kit::component::diff::DiffFile;
+    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::component::diff::{DiffFile, DiffLinePosition, DiffSide};
     use gpui_kit::test::{TestQueryExt, TestWindowExt};
     use gpui_kit::{
         AnyWindowHandle, AppContext as _, Bounds, Entity, Focusable as _, Role, TestAppContext,
@@ -1970,7 +2652,7 @@ mod tests {
         .unwrap();
     }
 
-    /// The patch comes from `gh` in production; the test seeds one so the pane
+    /// The patch comes from `gh` in production; the test seeds one so the panel
     /// can render without a network call.
     const PATCH: &str = "diff --git a/src/main.rs b/src/main.rs
 --- a/src/main.rs
@@ -1981,19 +2663,26 @@ mod tests {
  unchanged
 ";
 
+    const PR_URL: &str = "https://github.com/acme/api/pull/1";
+
+    fn seed_patch(view: &Entity<Diffy>, cx: &mut gpui_kit::App) {
+        view.update(cx, |view, cx| {
+            let url = view.state.selected_pr().unwrap().url.clone();
+            view.set_diff(
+                &url,
+                PATCH.to_string(),
+                Ok(DiffFile::parse(PATCH).expect("patch parses")),
+                cx,
+            );
+        });
+    }
+
     #[gpui_kit::test]
-    fn the_diff_shortcut_shows_the_parsed_patch(cx: &mut TestAppContext) {
+    fn the_diff_shortcut_opens_the_sliding_panel_and_escape_closes_it(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(bind_keys);
         let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
-
-        // A seeded patch keeps the pane off the network.
-        cx.update(|cx| {
-            view.update(cx, |view, cx| {
-                let url = view.state.selected_pr().unwrap().url.clone();
-                view.set_diff(&url, Ok(DiffFile::parse(PATCH).expect("patch parses")), cx);
-            });
-        });
+        cx.update(|cx| seed_patch(&view, cx));
 
         cx.update_window(handle, |_, window, cx| {
             focus_window(&view, window, cx);
@@ -2004,10 +2693,10 @@ mod tests {
 
         cx.update(|cx| {
             let view = view.read(cx);
-            assert_eq!(view.tab, DetailTab::Diff);
+            assert!(view.diff_panel_open, "⌘2 did not open the diff panel");
             assert!(
                 matches!(
-                    view.diffs.get("https://github.com/acme/api/pull/1"),
+                    view.diffs.get(PR_URL),
                     Some(DiffView::Ready { files: 1, .. })
                 ),
                 "the parsed patch did not reach the viewer"
@@ -2015,10 +2704,9 @@ mod tests {
         });
 
         cx.update_window(handle, |_, window, cx| {
-            let tabs = window.find_all_by_role(Role::Tab);
-            assert_eq!(tabs.len(), 2, "the review and diff tabs are missing");
-            let diff = window.find_all_by_role(Role::Document);
-            let pane = diff
+            assert!(window.has_active_sheet(cx), "the sliding panel is not open");
+            let docs = window.find_all_by_role(Role::Document);
+            let pane = docs
                 .first()
                 .expect("the diff viewer is not in the frame")
                 .bounds();
@@ -2027,10 +2715,144 @@ mod tests {
                 "the diff pane collapsed to {}px",
                 f32::from(pane.size.height)
             );
-            window.press("cmd-1", cx);
+            window.press("escape", cx);
+            window.render_frame(cx);
         })
         .unwrap();
 
-        cx.update(|cx| assert_eq!(view.read(cx).tab, DetailTab::Review));
+        cx.update_window(handle, |_, window, cx| {
+            assert!(
+                !window.has_active_sheet(cx),
+                "escape did not close the panel"
+            );
+        })
+        .unwrap();
+        cx.update(|cx| assert!(!view.read(cx).diff_panel_open));
+    }
+
+    /// Hovering a line surfaces the read-only "Ask to agent" action under it,
+    /// and a finished ask shows its answer as a task card on the same line.
+    #[gpui_kit::test]
+    fn hovering_a_line_shows_ask_to_agent_and_tasks_render_answers(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(bind_keys);
+        let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
+        cx.update(|cx| seed_patch(&view, cx));
+
+        cx.update_window(handle, |_, window, cx| {
+            focus_window(&view, window, cx);
+            window.press("cmd-2", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        // Hover the added line, then finish a task on it.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.hovered = Some(DiffLinePosition::new("src/main.rs", DiffSide::Modified, 2));
+                view.asks.insert(
+                    PR_URL.to_string(),
+                    vec![AskTask {
+                        id: 1,
+                        path: "src/main.rs".to_string(),
+                        side: AskSide::Modified,
+                        line: 2,
+                        code: Some("+new line".to_string()),
+                        question: "why this change?".to_string(),
+                        progress: String::new(),
+                        status: AskStatus::Running,
+                    }],
+                );
+                view.apply_ask(
+                    AskEvent::Done {
+                        url: PR_URL.to_string(),
+                        id: 1,
+                        answer: "because the old line was wrong".to_string(),
+                    },
+                    cx,
+                );
+            });
+        });
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let buttons = window.find_all_by_role(Role::Button);
+            let labels: Vec<Option<&str>> = buttons.iter().map(|b| b.label()).collect();
+            // The header ask trigger acts on the hovered line and takes no
+            // per-line space; the in-row "+" is the pointer path.
+            assert!(
+                labels.contains(&Some("Ask to agent…")),
+                "the ask button is missing from the panel header: {labels:?}"
+            );
+            assert!(
+                labels
+                    .iter()
+                    .any(|label| label.is_some_and(|l| l.starts_with("Add annotation to line"))),
+                "the per-line + ask trigger is missing: {labels:?}"
+            );
+            let ask = buttons
+                .iter()
+                .find(|b| b.label() == Some("Ask to agent…"))
+                .expect("ask button");
+            assert_ne!(ask.disabled(), Some(true), "hovered line should enable ask");
+        })
+        .unwrap();
+
+        cx.update(|cx| {
+            let view = view.read(cx);
+            let tasks = &view.asks[PR_URL];
+            assert_eq!(tasks.len(), 1);
+            assert!(
+                matches!(&tasks[0].status, AskStatus::Done(answer) if answer.contains("old line")),
+                "the ask event did not land on the task"
+            );
+            assert_eq!(
+                view.ask_annotations(view.state.selected_pr().unwrap())
+                    .len(),
+                1,
+                "only the task card annotates the diff; the ask trigger lives in the line row"
+            );
+        });
+    }
+
+    /// The panel quotes the hovered line's code from the stored patch.
+    #[gpui_kit::test]
+    fn the_panel_reads_line_code_from_the_patch(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(bind_keys);
+        let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
+        cx.update(|cx| seed_patch(&view, cx));
+
+        cx.update(|cx| {
+            let view = view.read(cx);
+            let added = DiffLinePosition::new("src/main.rs", DiffSide::Modified, 1);
+            let removed = DiffLinePosition::new("src/main.rs", DiffSide::Original, 1);
+            let context = DiffLinePosition::new("src/main.rs", DiffSide::Modified, 2);
+            // The patch marker is stripped: the ask quotes the source line.
+            assert_eq!(view.line_code(PR_URL, &added).as_deref(), Some("new line"));
+            assert_eq!(
+                view.line_code(PR_URL, &removed).as_deref(),
+                Some("old line")
+            );
+            assert_eq!(
+                view.line_code(PR_URL, &context).as_deref(),
+                Some("unchanged")
+            );
+        });
+
+        // Opening the panel does not hit the network: the seeded patch is kept.
+        cx.update_window(handle, |_, window, cx| {
+            focus_window(&view, window, cx);
+            window.press("cmd-2", cx);
+            window.render_frame(cx);
+            assert!(window.has_active_sheet(cx));
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert!(matches!(
+                view.read(cx).diffs.get(PR_URL),
+                Some(DiffView::Ready { files: 1, .. })
+            ));
+        });
     }
 }

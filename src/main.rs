@@ -4,6 +4,7 @@
 
 mod api;
 mod app;
+mod ask;
 mod claude;
 mod exec;
 mod log;
