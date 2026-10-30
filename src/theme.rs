@@ -29,14 +29,13 @@ pub fn apply(pref: ThemePref, cx: &mut App) {
 /// the selected row. Orange-700 keeps white text at 5.2:1; the ring uses
 /// orange-600, 3.6:1 against white.
 fn apply_light(theme: &mut Theme) {
-    // Grounds: the canvas, popovers and code are white; the panels, top and
-    // status strips, and the detail header sit one step off it.
+    // Grounds: the canvas, popovers and code are white; the panels, top
+    // strip, and the detail header sit one step off it.
     theme.background = shade(0xFFFFFF);
     theme.foreground = shade(0x171717);
     theme.sidebar = shade(0xFAFAFA);
     theme.sidebar_foreground = shade(0x171717);
     theme.title_bar = shade(0xFAFAFA);
-    theme.status_bar = shade(0xFAFAFA);
     theme.popover = shade(0xFFFFFF);
     theme.popover_foreground = shade(0x171717);
     theme.colors.list = shade(0xFAFAFA);
@@ -52,7 +51,6 @@ fn apply_light(theme: &mut Theme) {
     // control borders.
     theme.border = shade(0xE5E5E5);
     theme.sidebar_border = shade(0xE5E5E5);
-    theme.status_bar_border = shade(0xE5E5E5);
     theme.input = shade(0xD4D4D4);
     theme.list_hover = shade(0xF0F0F0);
     // The accent is orange.
@@ -92,7 +90,6 @@ fn apply_dark(theme: &mut Theme) {
     theme.sidebar = shade(0x0B0B0F);
     theme.sidebar_foreground = shade(0xEDEDED);
     theme.title_bar = shade(0x0B0B0F);
-    theme.status_bar = shade(0x0B0B0F);
     theme.popover = shade(0x121216);
     theme.popover_foreground = shade(0xEDEDED);
     theme.colors.list = shade(0x050506);
@@ -106,7 +103,6 @@ fn apply_dark(theme: &mut Theme) {
     theme.secondary_active = shade(0x24242A);
     theme.border = shade(0x26262C);
     theme.sidebar_border = shade(0x1E1E24);
-    theme.status_bar_border = shade(0x1E1E24);
     theme.input = shade(0x26262E);
     theme.list_hover = shade(0x121215);
     theme.primary = shade(0xEA580C);

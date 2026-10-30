@@ -24,7 +24,6 @@ use gpui_kit::component::{
     searchable_list::SearchableVec,
     select::{Select, SelectState},
     spinner::Spinner,
-    status_bar::StatusBar,
     tag::Tag,
     text::TextView,
     v_flex,
@@ -65,10 +64,10 @@ enum PanelKind {
     Prs,
 }
 
-/// A main-panel section that can be expanded to the full panel size, hiding
-/// the rest (the PR description included), until it is collapsed again.
+/// A tab of the main panel: the PR description, the diff, or the review.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExpandedSection {
+enum MainTab {
+    Pr,
     Diff,
     Review,
 }
@@ -122,18 +121,6 @@ enum DiffView {
     Failed(String),
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Tone {
-    Info,
-    Success,
-    Error,
-}
-
-struct Notice {
-    text: String,
-    tone: Tone,
-}
-
 pub struct Diffy {
     state: State,
     focus_handle: FocusHandle,
@@ -142,10 +129,8 @@ pub struct Diffy {
     detail_scroll: ScrollHandle,
     loading: bool,
     posting: Option<ReviewAction>,
-    notice: Option<Notice>,
-    /// The main-panel section currently expanded to full size; `None` is the
-    /// compact view (description on top, diff below, review as a strip).
-    expanded: Option<ExpandedSection>,
+    /// The main-panel tab currently shown below the tab bar.
+    tab: MainTab,
     /// Width of the repositories panel; the handle on its right edge drags
     /// it between `REPOS_MIN_WIDTH` and `REPOS_MAX_WIDTH`.
     repos_panel_width: Pixels,
@@ -227,8 +212,7 @@ impl Diffy {
             detail_scroll: ScrollHandle::new(),
             loading: false,
             posting: None,
-            notice: None,
-            expanded: None,
+            tab: MainTab::Pr,
             repos_panel_width: REPOS_DEFAULT_WIDTH,
             prs_panel_width: PRS_DEFAULT_WIDTH,
             panel_dragging: false,
@@ -301,10 +285,6 @@ impl Diffy {
                         this.diffs.clear();
                         this.asks.clear();
                         this.state.set_prs(prs);
-                        this.notice = Some(Notice {
-                            text: "Updated just now".to_string(),
-                            tone: Tone::Info,
-                        });
                         this.reset_selection_view(cx);
                     }
                     Err(error) => {
@@ -329,13 +309,9 @@ impl Diffy {
         log::info(format!("review started for {target}"));
         self.reset_detail_scroll();
         self.started.insert(pr.url.clone(), Instant::now());
-        self.notice = Some(Notice {
-            text: format!("Reviewing {target}…"),
-            tone: Tone::Info,
-        });
-        // The review lives in its own section of the main panel, so expand it
+        // The review lives in its own tab of the main panel, so switch to it
         // to show the run.
-        self.expanded = Some(ExpandedSection::Review);
+        self.tab = MainTab::Review;
         cx.notify();
 
         let events = self.events.clone();
@@ -387,10 +363,6 @@ impl Diffy {
                 self.set_error(format!("Could not save review: {error:#}"));
             } else {
                 log::info(format!("saved the review of {url}"));
-                self.notice = Some(Notice {
-                    text: format!("Saved the review of {}.", self.state.label(&url)),
-                    tone: Tone::Success,
-                });
             }
             self.reset_detail_scroll();
         }
@@ -427,17 +399,20 @@ impl Diffy {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toggle_section(ExpandedSection::Review, cx);
+        // ⌘2 jumps to the review tab and back to the PR tab.
+        self.select_tab(
+            if self.tab == MainTab::Review {
+                MainTab::Pr
+            } else {
+                MainTab::Review
+            },
+            cx,
+        );
     }
 
-    /// Expands a main-panel section to full size, or collapses it back to the
-    /// compact view when it is the expanded one.
-    fn toggle_section(&mut self, section: ExpandedSection, cx: &mut Context<Self>) {
-        self.expanded = if self.expanded == Some(section) {
-            None
-        } else {
-            Some(section)
-        };
+    /// Selects the main-panel tab shown below the tab bar.
+    fn select_tab(&mut self, tab: MainTab, cx: &mut Context<Self>) {
+        self.tab = tab;
         cx.notify();
     }
 
@@ -808,13 +783,6 @@ impl Diffy {
             .entry(pr.url.clone())
             .or_default()
             .push(task.clone());
-        self.notice = Some(Notice {
-            text: format!(
-                "Asking Claude about {}:{} (read-only)…",
-                task.path, task.line
-            ),
-            tone: Tone::Info,
-        });
         let events = self.events.clone();
         let request = ask::AskRequest {
             pr,
@@ -881,7 +849,7 @@ impl Diffy {
             .find(|task| task.id == id)
     }
 
-    /// Applies one ask event to the task it belongs to and to the status bar.
+    /// Applies one ask event to the task it belongs to.
     fn apply_ask(&mut self, event: AskEvent, cx: &mut Context<Self>) {
         match &event {
             AskEvent::Progress { url, id, text } => {
@@ -907,10 +875,6 @@ impl Diffy {
                 if let Some(task) = self.ask_task_mut(&url, id) {
                     task.status = AskStatus::Done(answer);
                 }
-                self.notice = Some(Notice {
-                    text: format!("Answered the question on {}.", self.state.label(&url)),
-                    tone: Tone::Success,
-                });
             }
             AskEvent::Failed { url, id, error } => {
                 if let Some(task) = self.ask_task_mut(&url, id) {
@@ -1015,17 +979,8 @@ impl Diffy {
         self.state.groups.len()
     }
 
-    fn pr_count(&self) -> usize {
-        self.state.groups.iter().map(|group| group.prs.len()).sum()
-    }
-
     fn set_error(&mut self, text: impl Into<String>) {
-        let text = text.into();
-        log::error(&text);
-        self.notice = Some(Notice {
-            text,
-            tone: Tone::Error,
-        });
+        log::error(text.into());
     }
 
     /// Opens the confirmation for posting the shown review. The body is
@@ -1134,10 +1089,6 @@ impl Diffy {
                 match result {
                     Ok(()) => {
                         log::info(format!("posted {action:?} review to {target}"));
-                        this.notice = Some(Notice {
-                            text: format!("{} {target}", verb(action)),
-                            tone: Tone::Success,
-                        })
                     }
                     Err(error) => this.set_error(format!("Could not post the review: {error:#}")),
                 }
@@ -1194,7 +1145,6 @@ impl Diffy {
             .h_full()
             .child(self.main_top_bar(cx))
             .child(self.detail(cx))
-            .child(self.status_bar(cx))
     }
 
     /// The strip above the content, a drag surface for the window.
@@ -1221,7 +1171,6 @@ impl Diffy {
         }
 
         let repos = self.repo_count();
-        let prs = self.pr_count();
 
         v_flex()
             .id("repos-panel")
@@ -1238,7 +1187,8 @@ impl Diffy {
                     .items_center()
                     .window_control_area(WindowControlArea::Drag)
                     // The lights float over the left end, so equal spacers centre
-                    // the wordmark in the strip.
+                    // the wordmark in the strip; the settings icon sits at the
+                    // right end of the strip, on the right side of the name.
                     .child(div().flex_1())
                     .child(
                         div()
@@ -1247,7 +1197,18 @@ impl Diffy {
                             .text_color(cx.theme().sidebar_foreground)
                             .child("Diffy"),
                     )
-                    .child(div().flex_1()),
+                    .child(
+                        h_flex().flex_1().justify_end().child(
+                            Button::new("open-settings")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Settings)
+                                .tooltip("Color theme and comment template")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_settings_dialog(window, cx)
+                                })),
+                        ),
+                    ),
             )
             .child(
                 h_flex()
@@ -1271,38 +1232,6 @@ impl Diffy {
                     ),
             )
             .child(list)
-            .child(
-                h_flex()
-                    .h_9()
-                    .flex_shrink_0()
-                    .px_3()
-                    .gap_2()
-                    .items_center()
-                    .border_t_1()
-                    .border_color(cx.theme().sidebar_border)
-                    .child(
-                        Button::new("open-settings")
-                            .ghost()
-                            .small()
-                            .icon(IconName::Settings)
-                            .label("Settings")
-                            .tooltip("Color theme and comment template")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_settings_dialog(window, cx)
-                            })),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{prs} pull request{} · {repos} repo{}",
-                                plural(prs),
-                                plural(repos)
-                            )),
-                    ),
-            )
             // The seam between this panel and the PR list is the resize
             // handle's own hairline, so the panel draws no border of its own.
             .child(self.panel_resize_handle(PanelKind::Repos, REPOS_DEFAULT_WIDTH, cx))
@@ -1623,101 +1552,64 @@ impl Diffy {
             .child(self.detail_body(&pr, cx))
     }
 
-    /// The main panel's body. In the compact view the description fills the
-    /// panel and the diff and review are collapsed strips showing only their
-    /// headers. Expanding a section gives it the full body and hides
-    /// everything else, until it is collapsed again.
+    /// The main panel's body: the tab bar at the top (PR, Diff, Review), then
+    /// the selected tab's content filling the rest of the panel.
     fn detail_body(&mut self, pr: &PullRequest, cx: &mut Context<Self>) -> AnyElement {
-        match self.expanded {
-            Some(ExpandedSection::Diff) => v_flex()
+        let content: AnyElement = match self.tab {
+            MainTab::Pr => div()
+                .id("description-scroll")
                 .flex_1()
                 .min_h_0()
-                .min_w_0()
-                .child(self.diff_section(pr, true, cx))
-                .into_any_element(),
-            Some(ExpandedSection::Review) => v_flex()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
-                .child(self.review_section(pr, true, cx))
-                .into_any_element(),
-            None => v_flex()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
+                .track_scroll(&self.detail_scroll)
+                .overflow_y_scrollbar()
                 .child(
-                    div()
-                        .id("description-scroll")
-                        .flex_1()
-                        .min_h_0()
-                        .track_scroll(&self.detail_scroll)
-                        .overflow_y_scrollbar()
-                        .child(
-                            v_flex()
-                                .id("description-content")
-                                .test_support()
-                                .px_6()
-                                .py_4()
-                                .child(self.description(pr, cx)),
-                        ),
+                    v_flex()
+                        .id("description-content")
+                        .test_support()
+                        .px_6()
+                        .py_4()
+                        .child(self.description(pr, cx)),
                 )
-                .child(self.diff_section(pr, false, cx))
-                .child(self.review_section(pr, false, cx))
                 .into_any_element(),
-        }
+            MainTab::Diff => self.diff_section(pr, cx),
+            MainTab::Review => self.review_section(pr, cx),
+        };
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(self.tabs_bar(pr, cx))
+            .child(content)
+            .into_any_element()
     }
 
-    /// The diff section of the main panel. Collapsed, it is only its header
-    /// row (collapse toggle and file count); expanded, it takes the full
-    /// panel and shows the read-only viewer with its per-line "+" ask
-    /// affordance and the task cards.
-    fn diff_section(
-        &mut self,
-        pr: &PullRequest,
-        expanded: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let weak = cx.entity().downgrade();
+    /// The tab bar at the top of the main panel: the PR, Diff and Review
+    /// tabs, with the file count and the review status at the right end.
+    fn tabs_bar(&mut self, pr: &PullRequest, cx: &mut Context<Self>) -> AnyElement {
         let files = match self.diffs.get(&pr.url) {
             Some(DiffView::Ready { files, .. }) => {
                 Some(format!("{} file{}", files, plural(*files)))
             }
             _ => None,
         };
-        let mut section = v_flex()
-            .id("diff-section")
+        v_flex()
+            .id("tabs-bar")
             .test_support()
             .min_w_0()
-            .border_t_1()
+            .flex_shrink_0()
+            .border_b_1()
             .border_color(cx.theme().border)
-            .when(expanded, |this| this.flex_1().min_h_0())
-            .when(!expanded, |this| this.flex_shrink_0())
             .child(
                 h_flex()
                     .px_6()
-                    .pt_3()
+                    .pt_2()
                     .pb_2()
-                    .gap_2()
+                    .gap_1()
                     .items_center()
-                    .child(
-                        Button::new("toggle-diff-section")
-                            .ghost()
-                            .small()
-                            .icon(if expanded {
-                                IconName::ChevronUp
-                            } else {
-                                IconName::ChevronDown
-                            })
-                            .label("Diff")
-                            .tooltip(if expanded {
-                                "Collapse the diff back to the compact view"
-                            } else {
-                                "Expand the diff to the full panel"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_section(ExpandedSection::Diff, cx)
-                            })),
-                    )
+                    .child(self.tab_item("tab-pr", "PR", MainTab::Pr, cx))
+                    .child(self.tab_item("tab-diff", "Diff", MainTab::Diff, cx))
+                    .child(self.tab_item("tab-review", "Review", MainTab::Review, cx))
+                    .child(div().flex_1())
                     .when_some(files, |this, files| {
                         this.child(
                             div()
@@ -1726,87 +1618,86 @@ impl Diffy {
                                 .child(files),
                         )
                     })
-                    .child(div().flex_1()),
-            );
-        if expanded {
-            let body = match self.diffs.get(&pr.url) {
-                Some(DiffView::Ready { state, .. }) => {
-                    self.diff_ready(pr, state.clone(), &weak, cx)
-                }
-                Some(DiffView::Failed(error)) => self.diff_failed(error.clone(), &weak, cx),
-                Some(DiffView::Loading(_)) | None => v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .justify_center()
-                    .items_center()
-                    .gap_3()
-                    .child(Spinner::new().large())
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Loading the diff…"),
-                    )
-                    .into_any_element(),
-            };
-            section = section.child(body);
-        }
-        section.into_any_element()
-    }
-
-    /// The review section of the main panel. It always shows a strip with the
-    /// collapse toggle and the review's status; expanded, it takes the full
-    /// panel on a background one tone off the ground, so the cut from the PR
-    /// description and diff is visible.
-    fn review_section(
-        &mut self,
-        pr: &PullRequest,
-        expanded: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let weak = cx.entity().downgrade();
-        let mut section = v_flex()
-            .id("review-section")
-            .test_support()
-            .min_w_0()
-            .bg(cx.theme().sidebar)
-            .border_t_1()
-            .border_color(cx.theme().sidebar_border)
-            .when(expanded, |this| this.flex_1().min_h_0())
-            .when(!expanded, |this| this.flex_shrink_0())
-            .child(
-                h_flex()
-                    .px_6()
-                    .pt_3()
-                    .pb_2()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        Button::new("toggle-review-section")
-                            .ghost()
-                            .small()
-                            .icon(if expanded {
-                                IconName::ChevronUp
-                            } else {
-                                IconName::ChevronDown
-                            })
-                            .label("Review")
-                            .tooltip(if expanded {
-                                "Collapse the review back to the compact view"
-                            } else {
-                                "Expand the review to the full panel (⌘2)"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_section(ExpandedSection::Review, cx)
-                            })),
-                    )
                     .when_some(self.review_status_chip(pr, cx), |this, chip| {
                         this.child(chip)
-                    })
-                    .child(div().flex_1()),
-            );
-        if expanded {
-            section = section.child(
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// One tab of the main panel's tab bar; the selected tab is highlighted.
+    fn tab_item(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        tab: MainTab,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = self.tab == tab;
+        div()
+            .id(id)
+            .test_support()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .text_xs()
+            .cursor_pointer()
+            .when(selected, |this| {
+                this.bg(cx.theme().muted)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().foreground)
+            })
+            .when(!selected, |this| {
+                this.text_color(cx.theme().muted_foreground)
+                    .hover(|style| style.bg(cx.theme().list_hover))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| this.select_tab(tab, cx)))
+            .child(label)
+    }
+
+    /// The diff tab's content: the read-only viewer with its per-line "+"
+    /// ask affordance and the task cards.
+    fn diff_section(&mut self, pr: &PullRequest, cx: &mut Context<Self>) -> AnyElement {
+        let weak = cx.entity().downgrade();
+        let body = match self.diffs.get(&pr.url) {
+            Some(DiffView::Ready { state, .. }) => self.diff_ready(pr, state.clone(), &weak, cx),
+            Some(DiffView::Failed(error)) => self.diff_failed(error.clone(), &weak, cx),
+            Some(DiffView::Loading(_)) | None => v_flex()
+                .flex_1()
+                .min_h_0()
+                .justify_center()
+                .items_center()
+                .gap_3()
+                .child(Spinner::new().large())
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Loading the diff…"),
+                )
+                .into_any_element(),
+        };
+        v_flex()
+            .id("diff-section")
+            .test_support()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(body)
+            .into_any_element()
+    }
+
+    /// The review tab's content, on the same ground as the PR description
+    /// and the diff.
+    fn review_section(&mut self, pr: &PullRequest, cx: &mut Context<Self>) -> AnyElement {
+        let weak = cx.entity().downgrade();
+        v_flex()
+            .id("review-section")
+            .test_support()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(
                 div()
                     .id("review-scroll")
                     .flex_1()
@@ -1820,9 +1711,8 @@ impl Diffy {
                             .p_6()
                             .child(self.review(pr, &weak, cx)),
                     ),
-            );
-        }
-        section.into_any_element()
+            )
+            .into_any_element()
     }
 
     /// The panel's failure state for a patch that could not be loaded.
@@ -2011,17 +1901,21 @@ impl Diffy {
                     ),
             )
             .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(meta.join(" · ")),
-            )
-            .child(
                 h_flex()
                     .gap_2()
                     .items_center()
                     .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(meta.join(" · ")),
+                    )
+                    .child(
                         Button::new("run-review")
+                            .small()
                             .label(if running {
                                 "Reviewing…"
                             } else if history_len > 0 {
@@ -2038,54 +1932,59 @@ impl Diffy {
                             .loading(running)
                             .disabled(running)
                             .on_click(cx.listener(|this, _, _, cx| this.run_review(cx))),
-                    )
-                    .when(!running && done, |this| {
-                        this.child(div().flex_1())
-                            .child(
-                                Button::new("post-comment")
-                                    .label("Comment")
-                                    .outline()
+                    ),
+            )
+            .when(!running && done, |this| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("post-comment")
+                                .label("Comment")
+                                .outline()
+                                .disabled(busy)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.confirm_post(ReviewAction::Comment, window, cx)
+                                })),
+                        )
+                        // GitHub refuses an approval or a change request on your
+                        // own PR, so only the comment is offered there.
+                        .when(!pr.by_me, |this| {
+                            this.child(
+                                Button::new("post-changes")
+                                    .label("Request changes")
+                                    .danger()
                                     .disabled(busy)
+                                    .loading(self.posting == Some(ReviewAction::RequestChanges))
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.confirm_post(ReviewAction::Comment, window, cx)
+                                        this.confirm_post(ReviewAction::RequestChanges, window, cx)
                                     })),
                             )
-                            // GitHub refuses an approval or a change request on your
-                            // own PR, so only the comment is offered there.
-                            .when(!pr.by_me, |this| {
-                                this.child(
-                                    Button::new("post-changes")
-                                        .label("Request changes")
-                                        .danger()
-                                        .disabled(busy)
-                                        .loading(self.posting == Some(ReviewAction::RequestChanges))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.confirm_post(ReviewAction::RequestChanges, window, cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new("post-approve")
-                                        .label("Approve")
-                                        .success()
-                                        .disabled(busy)
-                                        .loading(self.posting == Some(ReviewAction::Approve))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.confirm_post(ReviewAction::Approve, window, cx)
-                                        })),
-                                )
-                            })
-                            .when(pr.by_me, |this| {
-                                this.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(
-                                            "GitHub only accepts comments on your own pull requests.",
-                                        ),
-                                )
-                            })
-                    }),
-            )
+                            .child(
+                                Button::new("post-approve")
+                                    .label("Approve")
+                                    .success()
+                                    .disabled(busy)
+                                    .loading(self.posting == Some(ReviewAction::Approve))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.confirm_post(ReviewAction::Approve, window, cx)
+                                    })),
+                            )
+                        })
+                        .when(pr.by_me, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        "GitHub only accepts comments on your own pull requests.",
+                                    ),
+                            )
+                        }),
+                )
+            })
     }
 
     /// The PR description, rendered directly inside the panel (the scroll
@@ -2421,51 +2320,6 @@ impl Diffy {
                 )
             })
     }
-
-    fn status_bar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let hints = "⌘2 review · ⌘F filter · ⌘R refresh";
-        let position = self
-            .state
-            .prs
-            .iter()
-            .position(|pr| Some(pr.url.as_str()) == self.state.selected.as_deref())
-            .map(|index| format!("{} of {} · ", index + 1, self.state.prs.len()));
-        let mut bar = StatusBar::new()
-            .flex_shrink_0()
-            .h_9()
-            .px_4()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .text_xs();
-        if let Some(position) = position {
-            bar = bar.left(position);
-        }
-        bar.left(hints).right(self.notice_element(cx))
-    }
-
-    fn notice_element(&self, cx: &App) -> impl IntoElement {
-        let Some(notice) = &self.notice else {
-            return div().into_any_element();
-        };
-        let color = match notice.tone {
-            Tone::Info => cx.theme().muted_foreground,
-            Tone::Success => cx.theme().success,
-            Tone::Error => cx.theme().danger,
-        };
-        h_flex()
-            .gap_1()
-            .text_color(color)
-            .child(
-                Icon::new(match notice.tone {
-                    Tone::Info => IconName::Info,
-                    Tone::Success => IconName::CircleCheck,
-                    Tone::Error => IconName::CircleAlert,
-                })
-                .small(),
-            )
-            .child(div().max_w_80().truncate().child(notice.text.clone()))
-            .into_any_element()
-    }
 }
 
 impl Render for Diffy {
@@ -2774,14 +2628,6 @@ fn action_variant(action: ReviewAction) -> ButtonVariant {
     }
 }
 
-fn verb(action: ReviewAction) -> &'static str {
-    match action {
-        ReviewAction::Approve => "Approved",
-        ReviewAction::RequestChanges => "Requested changes on",
-        ReviewAction::Comment => "Commented on",
-    }
-}
-
 /// Second line of a list row: author, freshness, discussion.
 fn pr_meta(pr: &PullRequest) -> String {
     let mut parts = Vec::new();
@@ -2809,7 +2655,7 @@ fn plural(count: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiffView, Diffy, ExpandedSection, PRS_DEFAULT_WIDTH, PRS_MAX_WIDTH, REPOS_DEFAULT_WIDTH,
+        DiffView, Diffy, MainTab, PRS_DEFAULT_WIDTH, PRS_MAX_WIDTH, REPOS_DEFAULT_WIDTH,
         REPOS_MIN_WIDTH, bind_keys,
     };
     use crate::ask::{AskEvent, AskSide, AskStatus, AskTask};
@@ -3001,37 +2847,30 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn cmd_2_expands_the_review_section_to_full_size(cx: &mut TestAppContext) {
+    fn cmd_2_switches_to_the_review_tab_and_back(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(bind_keys);
         let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
         cx.update(|cx| seed_patch(&view, cx));
 
-        // Compact view: the description fills the panel, and the diff and
-        // review are collapsed strips showing only their headers.
+        // The PR tab is selected by default: the description fills the panel
+        // below the tab bar, and the diff and review tabs show nothing.
         cx.update_window(handle, |_, window, cx| {
             focus_window(&view, window, cx);
             window.render_frame(cx);
             assert!(
                 element_bounds(window, "description-content").is_some(),
-                "the description should be visible in the compact view"
+                "the description should be visible on the PR tab"
             );
-            for id in ["diff-section", "review-section"] {
-                let strip = element_bounds(window, id).expect("section strip");
-                assert!(
-                    strip.size.height < px(100.),
-                    "{id} should be a collapsed strip in the compact view, got {}px",
-                    f32::from(strip.size.height)
-                );
-            }
+            assert!(element_bounds(window, "tabs-bar").is_some());
             assert!(
                 window.find_all_by_role(Role::Document).is_empty(),
-                "the diff viewer should not render while the diff is collapsed"
+                "the diff viewer should not render on the PR tab"
             );
         })
         .unwrap();
 
-        // ⌘2 expands the review to the full panel and hides the rest.
+        // ⌘2 switches to the review tab, which fills the panel.
         cx.update_window(handle, |_, window, cx| {
             window.press("cmd-2", cx);
             window.render_frame(cx);
@@ -3040,7 +2879,7 @@ mod tests {
 
         cx.update(|cx| {
             let view = view.read(cx);
-            assert_eq!(view.expanded, Some(ExpandedSection::Review));
+            assert_eq!(view.tab, MainTab::Review);
             assert!(
                 matches!(
                     view.diffs.get(PR_URL),
@@ -3055,41 +2894,40 @@ mod tests {
             let review = element_bounds(window, "review-section").expect("review section");
             assert!(
                 review.size.height > px(300.),
-                "the expanded review should fill the panel, got {}px",
+                "the review tab should fill the panel, got {}px",
                 f32::from(review.size.height)
             );
             assert!(
                 element_bounds(window, "description-content").is_none(),
-                "the description should be hidden while the review is expanded"
+                "the description should be hidden on the review tab"
             );
             assert!(
                 element_bounds(window, "diff-section").is_none(),
-                "the diff should be hidden while the review is expanded"
+                "the diff should be hidden on the review tab"
             );
         })
         .unwrap();
 
-        // ⌘2 again collapses back to the compact view.
+        // ⌘2 again switches back to the PR tab.
         cx.update_window(handle, |_, window, cx| {
             window.press("cmd-2", cx);
             window.render_frame(cx);
         })
         .unwrap();
 
-        cx.update(|cx| assert_eq!(view.read(cx).expanded, None));
+        cx.update(|cx| assert_eq!(view.read(cx).tab, MainTab::Pr));
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             assert!(element_bounds(window, "description-content").is_some());
-            assert!(element_bounds(window, "diff-section").is_some());
+            assert!(element_bounds(window, "review-section").is_none());
         })
         .unwrap();
     }
 
-    /// The diff is collapsed by default (header only); expanding it gives it
-    /// the full panel with the viewer rendered, and hides the PR description
-    /// and the review strip until it is collapsed again.
+    /// The diff tab shows the full panel with the viewer rendered and hides
+    /// the PR description and the review; switching tabs brings them back.
     #[gpui_kit::test]
-    fn the_diff_is_collapsed_by_default_and_expands_to_the_full_panel(cx: &mut TestAppContext) {
+    fn the_diff_tab_fills_the_panel_and_hides_the_other_tabs(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(bind_keys);
         let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
@@ -3099,64 +2937,54 @@ mod tests {
             focus_window(&view, window, cx);
             window.render_frame(cx);
             assert!(element_bounds(window, "description-content").is_some());
-            let strip = element_bounds(window, "diff-section").expect("diff strip");
-            assert!(
-                strip.size.height < px(100.),
-                "the diff should be collapsed to its header by default, got {}px",
-                f32::from(strip.size.height)
-            );
+            assert!(element_bounds(window, "diff-section").is_none());
         })
         .unwrap();
 
-        // Click the diff section's toggle.
+        // Click the Diff tab.
         cx.update_window(handle, |_, window, cx| {
-            window.click("toggle-diff-section", cx);
+            window.click("tab-diff", cx);
             window.render_frame(cx);
         })
         .unwrap();
 
-        cx.update(|cx| assert_eq!(view.read(cx).expanded, Some(ExpandedSection::Diff)));
+        cx.update(|cx| assert_eq!(view.read(cx).tab, MainTab::Diff));
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             let diff = element_bounds(window, "diff-section").expect("diff section");
             assert!(
                 diff.size.height > px(400.),
-                "the expanded diff should fill the panel, got {}px",
+                "the diff tab should fill the panel, got {}px",
                 f32::from(diff.size.height)
             );
             let docs = window.find_all_by_role(Role::Document);
             assert!(
                 docs.iter().any(|doc| doc.bounds().size.height > px(150.)),
-                "the diff viewer should render when the section is expanded"
+                "the diff viewer should render on the diff tab"
             );
             assert!(
                 element_bounds(window, "description-content").is_none(),
-                "the description should be hidden while the diff is expanded"
+                "the description should be hidden on the diff tab"
             );
             assert!(
                 element_bounds(window, "review-section").is_none(),
-                "the review strip should be hidden while the diff is expanded"
+                "the review should be hidden on the diff tab"
             );
         })
         .unwrap();
 
-        // Clicking the toggle again collapses back to the compact view.
+        // Clicking the PR tab switches back.
         cx.update_window(handle, |_, window, cx| {
-            window.click("toggle-diff-section", cx);
+            window.click("tab-pr", cx);
             window.render_frame(cx);
         })
         .unwrap();
 
-        cx.update(|cx| assert_eq!(view.read(cx).expanded, None));
+        cx.update(|cx| assert_eq!(view.read(cx).tab, MainTab::Pr));
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             assert!(element_bounds(window, "description-content").is_some());
-            let strip = element_bounds(window, "diff-section").expect("diff strip");
-            assert!(
-                strip.size.height < px(100.),
-                "the diff should be a header strip again after collapsing, got {}px",
-                f32::from(strip.size.height)
-            );
+            assert!(element_bounds(window, "diff-section").is_none());
         })
         .unwrap();
     }
@@ -3233,11 +3061,11 @@ mod tests {
             });
         });
 
-        // Expand the diff section so its line rows render, then check the
+        // Switch to the diff tab so its line rows render, then check the
         // in-row "+" ask trigger.
         cx.update_window(handle, |_, window, cx| {
             focus_window(&view, window, cx);
-            window.click("toggle-diff-section", cx);
+            window.click("tab-diff", cx);
             window.render_frame(cx);
             let buttons = window.find_all_by_role(Role::Button);
             let labels: Vec<Option<&str>> = buttons.iter().map(|b| b.label()).collect();
@@ -3512,5 +3340,41 @@ mod tests {
             grammar.has_grammar(),
             "no rust grammar is compiled in; the diff renders without syntax colors"
         );
+    }
+
+    /// The main panel opens on a tab bar at its top with the PR, Diff and
+    /// Review tabs in that order on one row, above the tab content.
+    #[gpui_kit::test]
+    fn the_main_panel_has_pr_diff_review_tabs_at_the_top(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(bind_keys);
+        let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
+        cx.update(|cx| seed_patch(&view, cx));
+        cx.update_window(handle, |_, window, cx| {
+            focus_window(&view, window, cx);
+            window.render_frame(cx);
+            let bar = element_bounds(window, "tabs-bar").expect("tabs bar");
+            let pr = element_bounds(window, "tab-pr").expect("PR tab");
+            let diff = element_bounds(window, "tab-diff").expect("Diff tab");
+            let review = element_bounds(window, "tab-review").expect("Review tab");
+            assert_eq!(
+                f32::from(pr.origin.y),
+                f32::from(diff.origin.y),
+                "the tabs should share one row"
+            );
+            assert_eq!(f32::from(diff.origin.y), f32::from(review.origin.y));
+            assert!(
+                f32::from(pr.origin.x) < f32::from(diff.origin.x)
+                    && f32::from(diff.origin.x) < f32::from(review.origin.x),
+                "the tabs should read PR, Diff, Review left to right"
+            );
+            // The bar sits at the top of the panel body, above the content.
+            let content = element_bounds(window, "description-content").expect("PR content");
+            assert!(
+                f32::from(bar.origin.y + bar.size.height) <= f32::from(content.origin.y) + 0.5,
+                "the tab bar should be above the tab content"
+            );
+        })
+        .unwrap();
     }
 }
