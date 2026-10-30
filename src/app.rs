@@ -1,4 +1,5 @@
 use crate::api::{self, ReviewAction};
+use crate::log;
 use crate::models::{Finding, PullRequest, ReviewReport, Verdict};
 use crate::review::ReviewEvent;
 use crate::state::{ReviewStatus, Row, State};
@@ -132,19 +133,21 @@ impl Diffy {
         };
 
         match store::load_reviews() {
-            Ok(saved) => this
-                .state
-                .reviews
-                .extend(saved.into_iter().map(|(url, reports)| {
-                    let history = reports
-                        .into_iter()
-                        .map(|(reviewed_at, report)| ReviewStatus::Done {
-                            report,
-                            reviewed_at,
-                        })
-                        .collect();
-                    (url, history)
-                })),
+            Ok(saved) => {
+                log::info(format!("loaded saved reviews for {} PRs", saved.len()));
+                this.state
+                    .reviews
+                    .extend(saved.into_iter().map(|(url, reports)| {
+                        let history = reports
+                            .into_iter()
+                            .map(|(reviewed_at, report)| ReviewStatus::Done {
+                                report,
+                                reviewed_at,
+                            })
+                            .collect();
+                        (url, history)
+                    }))
+            }
             Err(error) => this.set_error(format!("Could not load saved reviews: {error:#}")),
         }
         this
@@ -160,6 +163,7 @@ impl Diffy {
             return;
         }
         self.loading = true;
+        log::info("refreshing review requests");
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async { api::get_review_prs() }).await;
@@ -167,6 +171,7 @@ impl Diffy {
                 this.loading = false;
                 match result {
                     Ok(prs) => {
+                        log::info(format!("loaded {} review requests", prs.len()));
                         this.state.set_prs(prs);
                         this.notice = Some(Notice {
                             text: "Updated just now".to_string(),
@@ -193,6 +198,7 @@ impl Diffy {
             return;
         };
         let target = format!("{}#{}", pr.repo_name(), pr.number);
+        log::info(format!("review started for {target}"));
         self.reset_detail_scroll();
         self.started.insert(pr.url.clone(), Instant::now());
         self.notice = Some(Notice {
@@ -208,6 +214,24 @@ impl Diffy {
     }
 
     fn apply(&mut self, event: ReviewEvent, cx: &mut Context<Self>) {
+        match &event {
+            ReviewEvent::Stage { url, stage } => {
+                log::info(format!("{url}: {}", stage.label()));
+            }
+            ReviewEvent::Progress { .. } => {}
+            ReviewEvent::Done { url, report } => {
+                log::info(format!(
+                    "{url}: review done ({:?}, {} confirmed, {} accepted, {} dismissed)",
+                    report.verdict,
+                    report.confirmed.len(),
+                    report.accepted.len(),
+                    report.dismissed.len()
+                ));
+            }
+            ReviewEvent::Failed { url, error } => {
+                log::error(format!("{url}: review failed: {error}"));
+            }
+        }
         let done = match &event {
             ReviewEvent::Done { url, report } => Some((url.clone(), report.clone())),
             _ => None,
@@ -224,6 +248,7 @@ impl Diffy {
             if let Err(error) = store::save_review(&url, &report) {
                 self.set_error(format!("Could not save review: {error:#}"));
             } else {
+                log::info(format!("saved the review of {url}"));
                 self.notice = Some(Notice {
                     text: format!("Saved the review of {}.", self.state.label(&url)),
                     tone: Tone::Success,
@@ -268,8 +293,10 @@ impl Diffy {
     }
 
     fn set_error(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        log::error(&text);
         self.notice = Some(Notice {
-            text: text.into(),
+            text,
             tone: Tone::Error,
         });
     }
@@ -359,8 +386,9 @@ impl Diffy {
             return;
         }
         self.posting = Some(action);
-        cx.notify();
         let target = format!("{}#{}", pr.repo_name(), pr.number);
+        log::info(format!("posting {action:?} review to {target}"));
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { api::submit_review(&pr, action, &body, &report) })
@@ -369,6 +397,7 @@ impl Diffy {
                 this.posting = None;
                 match result {
                     Ok(()) => {
+                        log::info(format!("posted {action:?} review to {target}"));
                         this.notice = Some(Notice {
                             text: format!("{} {target}", verb(action)),
                             tone: Tone::Success,

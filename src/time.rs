@@ -18,6 +18,38 @@ pub fn parse_utc(value: &str) -> Option<i64> {
     Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
+/// RFC 3339 UTC for an epoch second, e.g. `2026-10-29T07:37:54Z`.
+pub fn utc_iso(epoch: i64) -> String {
+    let days = epoch.div_euclid(86_400);
+    let seconds = epoch.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds / 3_600,
+        seconds % 3_600 / 60,
+        seconds % 60
+    )
+}
+
+/// Howard Hinnant's civil-from-days, the inverse of `days_from_civil`.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
 /// Howard Hinnant's days-from-civil, valid for the Gregorian calendar.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
@@ -61,6 +93,17 @@ mod tests {
         assert_eq!(parse_utc(""), None);
         assert_eq!(parse_utc("not a date"), None);
         assert_eq!(parse_utc("2026-13-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn formats_utc_timestamps_for_the_log() {
+        assert_eq!(utc_iso(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc_iso(1_793_259_474), "2026-10-29T07:37:54Z");
+        assert_eq!(utc_iso(1_793_259_474 - 1), "2026-10-29T07:37:53Z");
+        assert_eq!(utc_iso(-1), "1969-12-31T23:59:59Z");
+        for value in ["2024-02-29T23:59:59Z", "2026-01-01T00:00:00Z"] {
+            assert_eq!(utc_iso(parse_utc(value).unwrap()), value);
+        }
     }
 
     #[test]

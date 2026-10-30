@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod claude;
 mod exec;
+mod log;
 mod models;
 mod review;
 mod state;
@@ -41,12 +42,16 @@ fn open_diffy(cx: &mut App) {
     }) {
         // A window opened from the terminal does not take focus on its own.
         Ok(_) => cx.activate(true),
-        Err(error) => eprintln!("could not open the Diffy window: {error:#}"),
+        Err(error) => {
+            log::error(format!("could not open the Diffy window: {error:#}"));
+            eprintln!("could not open the Diffy window: {error:#}");
+        }
     }
 }
 
 fn main() -> Result<()> {
     color_eyre::install()?;
+    log::info(format!("diffy {} starting", env!("CARGO_PKG_VERSION")));
 
     let application = application().with_assets(assets::Assets);
     // Closing the last window keeps Diffy in the dock on macOS; other
@@ -69,5 +74,6 @@ fn main() -> Result<()> {
         open_diffy(cx);
     });
 
+    log::info("diffy exited");
     Ok(())
 }

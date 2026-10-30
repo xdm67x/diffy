@@ -190,6 +190,19 @@ with the PR's `updatedAt`. Set `DIFFY_HOME` to keep these files somewhere else.
 
 Both files are plain `serde_json`, so nothing else is needed to read them.
 
+## Logs
+
+Diffy appends one line per event to `~/.diffy/logs/diffy-YYYY-MM-DD.log` (UTC day), one
+file per day: startup and exit, refreshes and how many PRs they found, review start, stage,
+result, save, and failure, posts, and every error shown in the status bar. Files are never
+pruned, so delete old ones when you no longer need them. Logging never writes PR diffs or
+review bodies, and a log write that fails is dropped rather than interrupting the app.
+
+```sh
+ls ~/.diffy/logs
+tail -f "$(ls -t ~/.diffy/logs/*.log | head -1)"
+```
+
 ## Configuration
 
 `~/.diffy/settings.json`:
@@ -204,7 +217,7 @@ Environment:
 | --- | --- |
 | `DIFFY_TEAMS` | Comma-separated teams, used when `settings.json` has no teams |
 | `DIFFY_SYSTEM_PROMPT` | Path to a system prompt file that overrides the embedded one |
-| `DIFFY_HOME` | Directory for `settings.json` and `reviews/` (default `~/.diffy`) |
+| `DIFFY_HOME` | Directory for `settings.json`, `reviews/`, and `logs/` (default `~/.diffy`) |
 
 Diffs larger than 120 000 characters are truncated in the initial prompt. The prompt tells
 the reviewers that they are seeing a partial diff and that they can fetch the rest with
@@ -234,6 +247,7 @@ src/
   review.rs                  reviewer council, finding matching, judge
   claude.rs                  headless Claude invocation, reviewer agent, JSON extraction
   store.rs                   ~/.diffy settings and saved review log
+  log.rs                     ~/.diffy/logs, one file per UTC day
 SYSTEM_PROMPT.md             system prompt for reviewers and judge, embedded at build time
 ```
 
