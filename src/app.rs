@@ -2855,4 +2855,28 @@ mod tests {
             ));
         });
     }
+
+    /// The diff panel paints syntax colors only when a grammar is compiled in:
+    /// the file's language is detected from its path, and the matching
+    /// tree-sitter grammar must be registered. Dropping the `tree-sitter-*`
+    /// features from the gpui-kit dependency fails this test.
+    #[test]
+    fn diff_files_detect_their_language_and_have_a_compiled_grammar() {
+        let files = DiffFile::parse(PATCH).expect("patch parses");
+        let file = &files[0];
+        assert_eq!(file.path().as_ref(), "src/main.rs");
+        assert_eq!(
+            file.language().as_ref(),
+            "rust",
+            "the syntax language should come from the path extension"
+        );
+        let registry = gpui_kit::component::highlighter::LanguageRegistry::singleton();
+        let grammar = registry
+            .language("rust")
+            .expect("rust is not a registered language");
+        assert!(
+            grammar.has_grammar(),
+            "no rust grammar is compiled in; the diff renders without syntax colors"
+        );
+    }
 }
