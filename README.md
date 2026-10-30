@@ -5,15 +5,16 @@ It finds the open PRs where you (or your team) are requested as a reviewer, plus
 PRs you wrote yourself, groups them by repository, and runs a two-reviewer + judge AI review
 for the PR you select. Several PRs can be reviewed at the same time, each run is kept in that
 PR's review history so you can run it again after new commits and compare, the PR's diff is
-shown read-only and syntax-highlighted right in the review pane, where you can also ask
+shown read-only and syntax-highlighted in the main panel's Diff tab, where you can also ask
 Claude about any line of it, and you can post a review to GitHub as an approval, a request
 for changes, or a comment.
 
-The window has three panels — repositories, the selected repo's pull requests, and the
-review — and the two left panels resize by dragging their seams. The Settings button in the
-repositories panel switches between light and dark themes and sets a template for the comment
-posted to GitHub. The interface is built with [GPUI](https://gpui.rs/) and
-[GPUI Kit](https://gpui-kit.com/). The design is documented in [DESIGN.md](DESIGN.md).
+The window has three panels — repositories, the selected repo's pull requests, and the main
+panel for the selected PR — and the two left panels resize by dragging their seams. The gear
+button in the repositories panel's top strip opens Settings, which switches between light and
+dark themes and sets a template for the comment posted to GitHub. The interface is built with
+[GPUI](https://gpui.rs/) and [GPUI Kit](https://gpui-kit.com/). The design is documented in
+[DESIGN.md](DESIGN.md).
 
 ## Requirements
 
@@ -74,37 +75,36 @@ an open draft is not ready to review yet.
 
 Diffy opens in a light, white window with an orange accent (a dark near-black theme with the
 same orange accent is available in Settings). The window has three panels: repositories on
-the left, the selected repository's pull requests in the middle, and the selected PR's
-review on the right. Both left panels resize by dragging the seam between them (double-click
-a seam to restore its default width), and their widths are remembered between launches. The
-window controls sit inside the repositories panel, which stays open beside the review.
+the left, the selected repository's pull requests in the middle, and the main panel for the
+selected PR on the right. Both left panels resize by dragging the seam between them
+(double-click a seam to restore its default width), and their widths are remembered between
+launches. The window controls sit inside the repositories panel's top strip, which also
+carries the Diffy wordmark and the Settings gear.
 
-The repositories panel lists every repo with open PRs waiting on you, with a count per repo,
-plus a **Settings** button at the bottom. Selecting a repo switches the middle list to its
-PRs and selects the newest one.
+The repositories panel lists every repo with open PRs waiting on you, with a count per repo
+under a **Repositories** header that also shows the total. Selecting a repo switches the
+middle list to its PRs and selects the newest one.
 
-The PR list starts with the filter field, then a header with the repo name, the visible
-count, and a refresh button, then the PR rows, newest first. Each row wraps long titles to
-two lines and shows the author, how long ago the PR changed, the number, and the state of
-that PR's latest review. A PR that changed after its newest review is marked **out of date**,
-so you know to run the review again before posting it. The footer shows the total pull
-requests and repositories, or the reviews running right now.
+The PR list starts with the filter field and a refresh button on the same top row, then the
+PR rows, newest first. Each row wraps long titles to two lines and shows a status marker for
+that PR's latest review (not reviewed, running, merge, changes requested, failed), the
+author, how long ago the PR changed, and the number. A PR that changed after its newest
+review is marked **out of date**, so you know to run the review again before posting it.
+While reviews run, the list's footer shows how many are running.
 
-The review pane has a compact header — the PR title with a **Yours** tag on the PRs you
-wrote and a link to GitHub, a metadata line with the number, repo, author, age, and comment
-count, and the actions: **Run review**, and once a review exists **Comment**,
-**Request changes**, **Approve**. The body below is a stack of collapsible sections: by
-default the PR **description** fills the pane (scrolling on its own) and the **Diff** and
-**Review** are collapsed strips showing only their headers — the review strip shows the
-verdict or the running stage. The **Diff** and **Review** section headers expand their
-section to the full pane, hiding the description and the other section, until they are
-collapsed again. Expanded, the diff shows the PR's patch read-only and syntax-highlighted —
-every changed file, with its hunk headers, line numbers, and added and removed lines, in one
-virtualized list that scrolls on its own and expands folded context on click. The review
-section keeps a background one tone off the ground so the cut from the description and diff
-is visible. `⌘2` expands or collapses the review section. The patch is fetched the first time a PR is selected and kept
-per PR until the next refresh, so returning to a PR costs nothing. A failed fetch says why
-and offers **Try again**.
+The main panel has a compact header — the PR title with a **Yours** tag on the PRs you
+wrote and an "Open on GitHub" link, a metadata line with the number, repo, author, age, and
+comment count, and the actions: **Run review**, and once a review exists **Comment**,
+**Request changes**, **Approve**. Below the header a tab bar switches the body between
+**PR**, **Diff**, and **Review**, with the changed-file count and the review's status chip at
+its right end. The **PR** tab fills the panel with the PR description rendered as markdown
+(images load over the network; embedded videos render as cards that open in the browser). The
+**Diff** tab shows the PR's patch read-only and syntax-highlighted — every changed file,
+with its hunk headers, line numbers, and added and removed lines, in one virtualized list
+that scrolls on its own and expands folded context on click. The **Review** tab shows the
+verdict and findings in a centred column. `⌘2` jumps to the **Review** tab and back. The
+patch is fetched the first time a PR is selected and kept per PR until the next refresh, so
+returning to a PR costs nothing. A failed fetch says why and offers **Try again**.
 
 Hovering a line shows a **+** inside the line row (like an inline review comment); clicking it
 opens a dialog that names the line (`path:line`), shows the line's code, and takes your question. On **Ask**,
@@ -116,56 +116,58 @@ a spinner while it runs, then the answer (selectable markdown, capped in height)
 with **Retry**. Several asks can run at once, one per line; tasks are kept per PR until the
 next refresh.
 
-The status bar at the bottom of the review pane shows your place in the list, the shortcut
-summary, and the last error or success message.
-
 The filter matches the PR title, the author, and the number (`#482`) within the selected
 repository, so a queue can be narrowed without leaving the repo. The `⌘F` hint inside the
 field focuses it. Repositories are switched in the left panel, not through the filter.
 
-The **Settings** dialog (the button in the repositories panel) has two preferences: the
-color theme (**Light** / **Dark**, applied immediately) and the **GitHub comment template** —
-a template with placeholders (`{pr}`, `{url}`, `{verdict}`, `{summary}`, `{intent}`,
-`{findings}`, `{dismissed}`) for the body of the review comment posted to GitHub; leave it
-empty for the built-in format. Both are saved to `~/.diffy/settings.json`.
+Failures (a failed refresh, review, save, ask, or post) are written to the log under
+`~/.diffy/logs`, and wherever a failure belongs to something on screen it is shown inline:
+a failed review renders an error card in the **Review** tab, a failed ask keeps its card with
+a **Retry**, and a failed diff offers **Try again**.
+
+The **Settings** dialog (the gear button in the repositories panel's top strip) has two
+preferences: the color theme (**Light** / **Dark**, applied immediately) and the **GitHub
+comment template** — a template with placeholders (`{pr}`, `{url}`, `{verdict}`, `{summary}`,
+`{intent}`, `{findings}`, `{dismissed}`) for the body of the review comment posted to GitHub;
+leave it empty for the built-in format. Both are saved to `~/.diffy/settings.json`.
 
 ## Keys
 
 | Key | Action |
 | --- | --- |
-| `⌘2` | Expand or collapse the review section |
+| `⌘2` | Jump to the Review tab (and back to the PR tab) |
 | `⌘F` | Focus the PR filter |
 | `⌘R` | Refresh the PR list from GitHub |
 | `Esc` | Leave the filter |
 
 Selection, running a review, stepping through review history, and submitting a review are
 done with the window controls: click a PR row, use the **Run review** button, the review
-history arrows, the review section header, and the **Comment** / **Request changes** / **Approve**
-buttons.
+history arrows in the verdict card, the **PR** / **Diff** / **Review** tabs, and the
+**Comment** / **Request changes** / **Approve** buttons.
 
-Posting uses the buttons in the review header: **Comment**, **Request changes**, and
+Posting uses the buttons in the main panel's header: **Comment**, **Request changes**, and
 **Approve**. Each one opens a dialog naming the PR with the review body in an editable text
 field, and nothing is posted before you confirm. They are disabled while a post is in flight
 and while no finished review is shown. On a PR you wrote, GitHub refuses an approval and a
 change request of your own work, so only **Comment** is offered there.
 
 With the mouse you can click a repository or a PR to select it, drag a seam between panels to
-resize it, scroll the PR list or a section of the review pane, hover a diff line and click its
-**+**, expand or collapse the diff and review sections from their headers, use the
-refresh button in the PR list header, and open Settings from the repositories panel.
+resize it, scroll the PR list or the main panel, hover a diff line and click its
+**+**, switch between the **PR**, **Diff**, and **Review** tabs, use the
+refresh button beside the filter, and open Settings from the repositories panel's top strip.
 
 The filter only hides rows of the selected repository. Every fetched PR stays loaded, so
 switching repositories or clearing the filter brings all of your pull requests back, and the
-selection follows a PR by its url rather than its position. Failures (a failed refresh,
-review, save, or post) appear in the status bar and stay there until the next action.
+selection follows a PR by its url rather than its position.
 
 Reviews run per PR and concurrently: run one PR, select another, run it, and both run as
-independent instances. The PR list footer shows how many reviews are running, and each list
+independent instances. Starting a review also switches the main panel to the **Review** tab.
+The PR list footer shows how many reviews are running, and each list
 row tracks its own PR's stage. A PR is never reviewed twice at the same time; its **Run review**
 button is disabled while it is running. A finished review of the PR you are reading resets
-the pane to the result; a background PR finishing does not disturb what you are looking at.
+the Review tab to the result; a background PR finishing does not disturb what you are looking at.
 
-Every run is a new attempt appended to that PR's history. The review section shows when the
+Every run is a new attempt appended to that PR's history. The Review tab shows when the
 shown attempt finished and `Review 2 of 3` with arrows to step through them, and the list
 row always reflects the newest attempt, including a failed one. If the PR changed after the
 shown review (`gh`'s `updatedAt` moved past the review's timestamp), the review says so and
@@ -186,7 +188,7 @@ denied rather than prompting. The prompt tells the reviewers to reach for `gh` f
 never to report Bash as unavailable when a command is refused.
 
 Sessions run with `--output-format stream-json`, so every tool call is relayed to the UI.
-While a review runs, its list row shows the running state and the review pane shows the
+While a review runs, its list row shows the running state and the Review tab shows the
 stage, the elapsed time, and the latest command (`reviewer 1 · gh pr diff …`).
 
 1. **Two independent reviewer agents run at the same time.** Diffy starts two headless
@@ -202,7 +204,7 @@ stage, the elapsed time, and the latest command (`reviewer 1 · gh pr diff …`)
    - `request_changes` — there is a confirmed or accepted blocking issue, or the diff
      does not do what the description promises.
 
-The result pane shows the verdict, when it was reviewed, the judge's intent assessment, the
+The Review tab shows the verdict, when it was reviewed, the judge's intent assessment, the
 combined summary, and every finding it stands behind ordered worst severity first. Each card
 says whether both reviewers reported it or the judge accepted it. Findings the judge
 dismissed are listed after those with the reason.
@@ -214,10 +216,11 @@ finished review currently shown. Diffy posts it with
 `gh pr review --approve | --request-changes | --comment`, using that report as the review
 body: a short summary, the confirmed and judge-accepted findings worst first, and the
 verdict at the end. Dismissed findings are left out. A finding whose fix is a one-line
-replacement is also posted as an inline GitHub suggestion through `gh api`, when the line
-is part of the diff. The confirmation dialog shows the body in a text field, and whatever
-it holds when you confirm is what gets posted. The body goes to `gh` through stdin, so its
-length is not limited by the command line.
+replacement is also posted as an inline GitHub suggestion through `gh api`, as a best
+effort — GitHub rejects a line that is not part of the diff, and the review body already
+explains the fix in prose. The confirmation dialog shows the body in a text field, and
+whatever it holds when you confirm is what gets posted. The body goes to `gh` through stdin
+(`--body-file -`), so its length is not limited by the command line.
 
 The initial body comes from the **GitHub comment template** in Settings when one is set —
 the template's placeholders (`{pr}`, `{verdict}`, `{summary}`, `{findings}`, …) are filled
@@ -225,14 +228,14 @@ with the report — and from the built-in format otherwise. You can still edit t
 confirmation dialog before posting.
 
 Nothing is posted before you confirm the dialog, and a failure (for example a revoked token)
-shows up in the status bar. Diffy does not record which reviews were posted, so posting the
+is logged to `~/.diffy/logs`. Diffy does not record which reviews were posted, so posting the
 same report twice creates two GitHub reviews.
 
 ## Saved reviews
 
 Every finished review is appended to `~/.diffy/reviews/reviews.jsonl` as one JSON object per
 line, and reloaded on the next start so past verdicts show up again in the PR list and the
-review pane. The file is append-only, and every line for a PR url is kept, oldest first. A
+Review tab. The file is append-only, and every line for a PR url is kept, oldest first. A
 failed attempt is shown for the session but not saved.
 
 ```json
@@ -256,9 +259,9 @@ Both files are plain `serde_json`, so nothing else is needed to read them.
 
 Diffy appends one line per event to `~/.diffy/logs/diffy-YYYY-MM-DD.log` (UTC day), one
 file per day: startup and exit, refreshes and how many PRs they found, review start, stage,
-result, save, and failure, posts, and every error shown in the status bar. Files are never
-pruned, so delete old ones when you no longer need them. Logging never writes PR diffs or
-review bodies, and a log write that fails is dropped rather than interrupting the app.
+result, save, and failure, ask sessions, posts, and every error the app reports. Files are
+never pruned, so delete old ones when you no longer need them. Logging never writes PR diffs
+or review bodies, and a log write that fails is dropped rather than interrupting the app.
 
 ```sh
 ls ~/.diffy/logs
@@ -309,18 +312,24 @@ with write access. Their answers are shown in Diffy only and are never posted.
 
 ```
 src/
-  main.rs                    bootstrap, window options, key bindings
-  app.rs                     GPUI view: the three panels (repositories, PR list, review), resizable
-                             seams, settings dialog, diff side panel, ask-to-agent, posting dialog
-  ask.rs                     read-only "ask to agent" sessions about one diff line
+  main.rs                    bootstrap, window options, key bindings, HTTP client install
+  app.rs                     GPUI view: the three panels (repositories, PR list, main panel with
+                             the PR/Diff/Review tabs), resizable seams, settings dialog,
+                             ask-to-agent, posting dialog
   state.rs                   repositories, selected repo, PR list, filter, selection, review history
-  api.rs                     gh search / gh pr diff / gh pr review
   models.rs                  PRs, findings, verdicts, repo grouping, comment template rendering
-  review.rs                  reviewer council, finding matching, judge
+  api.rs                     gh search / gh pr diff / gh pr review / inline suggestions
+  review.rs                  reviewer council, finding matching, judge, system prompt loading
   claude.rs                  headless Claude invocation (reviewer and read-only), JSON extraction
-  theme.rs                   light and dark palettes, installed from the saved theme preference
+  ask.rs                     read-only "ask to agent" sessions about one diff line
+  rich_text.rs               markdown plugins for the PR description (videos as browser-opening cards)
+  http.rs                    macOS NSURLSession HTTP client so remote media in PR bodies loads
+  exec.rs                    spawns gh/claude with a PATH that also sees Homebrew/mise installs
   store.rs                   ~/.diffy settings and saved review log
+  theme.rs                   light and dark palettes, installed from the saved theme preference
   log.rs                     ~/.diffy/logs, one file per UTC day
+  time.rs                    RFC 3339 parsing and age formatting for gh timestamps
+  mock.rs                    fixtures behind the `mock` feature
 SYSTEM_PROMPT.md             system prompt for reviewers and judge, embedded at build time
 ```
 
@@ -332,8 +341,12 @@ cargo clippy --all-targets
 cargo test
 ```
 
-The matching, JSON-parsing, review-log, settings, comment-template, and PR-list state logic
-have unit tests. `cargo test` also runs the headless GPUI integration tests, which render the
-real window and drive the keyboard paths for repo selection, the filter, the resizable
-panels, and the settings dialog. The Claude calls are not exercised in tests because they
-need credentials and cost money.
+The matching, JSON-parsing, review-log, settings, comment-template, PR-list state, ask-prompt,
+and video-embed logic have unit tests. `cargo test` also runs the headless GPUI integration
+tests, which render the real window and drive the keyboard paths for repo selection, the
+filter (`⌘F`/`Esc`), the **PR**/**Diff**/**Review** tabs (`⌘2`), the per-line ask cards, the
+resizable panels, and the settings dialog. The Claude calls are not exercised in tests
+because they need credentials and cost money.
+
+A `bacon` dev job (`bacon.toml`, press `d` in bacon) reruns `cargo run --features mock` on
+every change of `src/`, which is the fastest way to click through a change.

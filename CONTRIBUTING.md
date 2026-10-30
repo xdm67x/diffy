@@ -76,7 +76,9 @@ agent commits or creates a PR on your behalf:
   another PR.
 - Run Diffy and click through your change before opening the PR:
   `cargo run --release`, or `cargo run --release --features mock` to try it
-  without GitHub or Claude credentials.
+  without GitHub or Claude credentials. With [bacon](https://dystroy.org/bacon/)
+  installed, `bacon` (press `d` for its `dev` job, see `bacon.toml`) reruns the
+  mock build on every change of `src/`.
 - **Attach a screenshot or a video (screen recording or GIF) to the PR.** For
   changes to the window this is required, so reviewers can see the result
   without building it; describe what changed and how you tested it. For

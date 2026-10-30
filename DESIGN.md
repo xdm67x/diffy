@@ -10,53 +10,51 @@ and the data, quiet chrome separated by tone steps rather than decoration).
 ## The window: three panels
 
 The window is a three-pane shell: repositories on the left, the selected repository's PRs in
-the middle, the selected PR's review on the right.
+the middle, the selected PR's main panel on the right.
 
 ```
 ┌────────────────────┬──────────────────────────┬────────────────────────────────────┐
-│ repositories       │ PR list                  │ detail                             │
-│ ┌────────────────┐ │ ┌──────────────────────┐ │ ┌────────────────────────────────┐ │
-│ │ top: Diffy     │ │ │ filter (⌘F)          │ │ │ top strip: drag region         │ │
-│ ├────────────────┤ │ ├──────────────────────┤ │ ├────────────────────────────────┤ │
-│ │ Repositories 2 │ │ │ acme/api 3  ⟳        │ │ │ header: title, link, meta,     │ │
-│ │  acme/api   2  │ │ │   PR rows…           │ │ │ actions                        │ │
-│ │  acme/web   1  │ │ │   (status marker per │ │ ├────────────────────────────────┤ │
-│ ├────────────────┤ │ │    row)              │ │ │ description (fills the pane)   │ │
-│ │ ⚙ Settings · 3 │ │ ├──────────────────────┤ │ ├────────────────────────────────┤ │
-│ └────────────────┘ │ │ status strip         │ │ │ Diff ▾ strip (collapsed)       │ │
-│                    │ └──────────────────────┘ │ ├────────────────────────────────┤ │
-│                    │                          │ │ Review ▾ strip (tinted)        │ │
-│                    │                          │ │ status bar: position · hints · │
-│                    │                          │ │ notice                         │
+│ top strip:         │ filter (⌘F)          ⟳   │ top strip: drag region             │
+│  ●●●    Diffy     ⚙├──────────────────────────┼────────────────────────────────────┤
+│ Repositories 2     │ PR rows…                 │ header: title, Yours tag, link,    │
+│  acme/api   2      │   (status marker per     │ meta, actions (Run review, posts)  │
+│  acme/web   1      │    row)                  ├────────────────────────────────────┤
+│                    │                          │ tabs: PR Diff Review · 3 files ●   │
+│                    │ (N reviews running)      ├────────────────────────────────────┤
+│                    │                          │ tab content, fills the panel:      │
+│                    │                          │ PR description / diff / review     │
 └────────────────────┴──────────────────────────┴────────────────────────────────────┘
    ▲ drag to resize        ▲ drag to resize
 ```
 
 - **Left panel — repositories.** Every repo with open PRs waiting on you, with a count per
-  repo. Selecting one switches the middle list to its PRs and selects its newest PR. The
-  bottom strip holds the Settings button and the total PR count.
+  repo under a **Repositories** header that also carries the total. Selecting one switches
+  the middle list to its PRs and selects its newest PR. The top strip holds the traffic
+  lights, the centred wordmark, and the Settings gear at its right end.
 - **Middle panel — the PR list.** The selected repository's PRs, each with a status marker
-  (not reviewed / running / merge / changes requested / failed). The filter (⌘F) narrows
-  this list by title, author, and number. The selected row gets a soft orange fill; the
-  bottom strip shows the running-review count or the totals.
-- **Right panel — the detail.** The selected PR: a compact header band (title with the
+  (not reviewed / running / merge / changes requested / failed). The filter (⌘F) sits beside
+  the refresh button on the top row and narrows this list by title, author, and number. The
+  selected row gets a soft orange fill; while reviews run, the bottom strip shows the
+  running-review count.
+- **Right panel — the main panel.** The selected PR: a compact header band (title with the
   `Yours` tag and the "Open on GitHub" link, a metadata line with number, repo, author, age,
   comments, and the actions — `Run review`, and once a review exists `Comment`,
-  `Request changes`, `Approve`), then a body of collapsible sections: the **description**
-  fills the pane while the **diff** and **review** are collapsed strips. The status bar at
-  the bottom shows the selection position, the shortcut hints, and transient notices.
-- **Collapsible sections.** The diff and the review are sections inside the detail panel,
-  not overlays, and both are collapsed by default: only their header rows show (the review
-  strip also shows the verdict or the running stage), while the PR description fills the
-  pane. Each header is a toggle: expanding a section gives it the full body and hides the
-  rest — the PR description included — until it is collapsed again. The review section
-  paints one tone off the ground (`sidebar`), so the cut from the description and diff is
-  visible. The diff is read-only and syntax-highlighted and carries a per-line "+" ask
-  affordance whose answers render as cards on the line; ⌘2 expands or collapses the review
-  section.
+  `Request changes`, `Approve`), then a tab bar, then the selected tab's content filling the
+  rest of the panel.
+- **Tabs.** The main panel's body is a tab bar (**PR**, **Diff**, **Review**) plus one tab's
+  content — not overlays and not stacked sections. The **PR** tab renders the description as
+  full markdown directly in the panel (images load over HTTP, videos render as cards that
+  open in the browser). The **Diff** tab shows the read-only, syntax-highlighted patch and
+  carries a per-line "+" ask affordance whose answers render as cards on the line. The
+  **Review** tab shows the report in a centred 40 rem column. The tab bar's right end shows
+  the changed-file count once the patch is loaded and the newest review's status chip (the
+  verdict tag, or the running stage with a spinner). ⌘2 jumps to the **Review** tab and back
+  to the **PR** tab.
 
 The native title bar is transparent and the traffic lights float inside the repositories
-panel's top strip, with the wordmark centred in it.
+panel's top strip, with the wordmark centred in it and the Settings gear at the right end.
+The window opens centred at 1180×790 px and cannot shrink below 880×560 px; closing the last
+window keeps Diffy in the dock, and reopening it (dock click) brings the window back.
 
 ## The panels resize
 
@@ -72,8 +70,8 @@ when a drag ends, not on every pointer move.
 
 ## Settings
 
-The Settings button in the repositories panel opens a dialog with two preferences, both
-persisted in `~/.diffy/settings.json`:
+The Settings gear in the repositories panel's top strip opens a dialog with two preferences,
+both persisted in `~/.diffy/settings.json`:
 
 - **Appearance — Light or Dark.** The color theme. Applied immediately on save and on
   launch (`{"theme": "light"}` / `{"theme": "dark"}`). Light is the default: white ground,
@@ -94,7 +92,7 @@ persisted in `~/.diffy/settings.json`:
 Diffy opens in a **light** theme (switchable to dark in Settings): one ground, one ink, one
 accent. The accent is orange and
 appears on the primary action, links, the focus ring, the caret, and the selected PR row —
-nowhere else. Chrome surfaces (sidebar, top strips, status bar, detail header) sit one tone
+nowhere else. Chrome surfaces (sidebar, top strips, detail header) sit one tone
 off the white ground (`#FAFAFA`); cards and popovers are white; there are no gradients, glows,
 or shadows on resting surfaces. All colors are defined in `src/theme.rs` as GPUI Kit theme
 tokens, so every component reads them by semantic role.
@@ -103,10 +101,10 @@ tokens, so every component reads them by semantic role.
 | --- | --- | --- | --- |
 | Ground (canvas, popover, code) | `background`, `popover`, `colors.list` | `#FFFFFF` | |
 | Ink | `foreground` | `#171717` | 17.9:1 on white |
-| Chrome surfaces | `sidebar`, `title_bar`, `status_bar` | `#FAFAFA` | one step off the ground |
+| Chrome surfaces | `sidebar`, `title_bar` | `#FAFAFA` | one step off the ground |
 | Raised/inset surfaces | `muted`, `secondary`, `group_box` | `#F5F5F5` | |
 | Secondary text | `muted_foreground` | `#6B6B6B` | 5.3:1 on white |
-| Hairlines | `border`, `sidebar_border`, `status_bar_border` | `#E5E5E5` | the sidebar seam is the resize handle's own line |
+| Hairlines | `border`, `sidebar_border` | `#E5E5E5` | the sidebar seam is the resize handle's own line |
 | Control borders | `input` | `#D4D4D4` | one step darker than region hairlines |
 | Hover fills | `list_hover`, `secondary_hover` | `#F0F0F0` / `#ECECEC` | |
 | **Accent: primary action** | `primary` (+ hover/active) | `#C2410C` / `#9A3412` / `#7C2D12` | white label at 5.2:1 |
@@ -116,8 +114,9 @@ tokens, so every component reads them by semantic role.
 | Text selection | `selection` | `#FED7AA` | |
 | Success / danger / warning | `success`, `danger`, `warning` | `#15803D` / `#B42318` / `#B45309` | dark steps, ≥5:1 as text on white and as button fills with white labels |
 
-Code in the diff section is highlighted with the syntax theme of the active mode (light or
-dark). Radii are 7 px for controls and 11 px for large surfaces. The dark palette mirrors the
+Code in the diff tab is highlighted with tree-sitter grammars compiled in through the
+`tree-sitter-languages` feature of gpui-kit, themed for the active mode (light or dark).
+Radii are 7 px for controls and 11 px for large surfaces. The dark palette mirrors the
 table above: ground `#050506`, ink `#EDEDED`, muted text `#A1A1AA`, hairlines `#26262C`,
 primary `#EA580C` with a black label (5.9:1), ring/caret `#EA580C` (5.7:1 on the ground),
 links `#FB923C`, selected row `#331D0E`/`#9A3412`, status colors `#3FC07A` / `#E5566F` /
@@ -125,16 +124,18 @@ links `#FB923C`, selected row `#331D0E`/`#9A3412`, status colors `#3FC07A` / `#E
 
 ## Type, spacing, states
 
-- The platform UI font everywhere except code, progress lines, and the filter's `⌘F` hint,
-  which use the mono font. Base text is `text_sm` (14 px); the PR title is the only large
-  display size (`text_xl` semibold).
-- Spacing follows the shared semantic scale; the expanded review section keeps a centred
-  40 rem column so long reports keep a readable measure, while the diff uses the full width.
+- The platform UI font everywhere except code and the mono location/progress lines. Base text
+  is `text_sm` (14 px); the PR title is the display size (`text_xl` semibold), and the empty
+  and failure states use `text_lg`.
+- Spacing follows the shared semantic scale; the review tab keeps a centred 40 rem column so
+  long reports keep a readable measure, while the PR description and the diff use the full
+  width.
 - States are visible without hover: the selected row keeps its fill, running reviews show a
   spinner with the stage and elapsed seconds, a review older than the latest push is marked
-  "out of date" in the warning color, failures render an inline error card with a retry, and
-  the empty detail explains what will appear there. Notices and errors surface in the status
-  bar, not as banners.
+  "out of date" in the warning color, failures render inline (an error card in the review
+  tab, **Try again** on a failed diff, **Retry** on a failed ask), and the empty main panel
+  explains what will appear there. Errors and notices are logged to `~/.diffy/logs`, not
+  shown as banners.
 
 ## Keyboard
 
@@ -142,19 +143,26 @@ links `#FB923C`, selected row `#331D0E`/`#9A3412`, status colors `#3FC07A` / `#E
 | --- | --- |
 | `⌘F` | Focus the PR filter (Esc returns to the list) |
 | `⌘R` | Reload pull requests |
-| `⌘2` | Expand or collapse the review section |
+| `⌘2` | Jump to the Review tab (and back to the PR tab) |
 
 ## Where it lives
 
 - `src/theme.rs` — both palettes, installed from the saved `theme` preference.
-- `src/app.rs` — the shell (`render`, `repo_panel`, `pr_panel`, `main_pane`, `main_top_bar`),
-  the resize handles and their drag handling, the settings dialog, and the UI integration
-  tests that drive the real window (repo selection, filter, drag both seams, check the
-  clamps and the persisted settings, save from the settings dialog).
+- `src/app.rs` — the shell (`render`, `repo_panel`, `pr_panel`, `main_pane`, `main_top_bar`,
+  `tabs_bar`), the resize handles and their drag handling, the settings dialog, and the UI
+  integration tests that drive the real window (repo selection, filter, the PR/Diff/Review
+  tabs, the per-line ask cards, drag both seams, check the clamps and the persisted settings,
+  save from the settings dialog).
 - `src/state.rs` — the list model: repositories, the selected repo, the per-repo PR rows,
   filter, and selection.
 - `src/models.rs` — `render_comment_template`, the placeholder rendering for the GitHub
   comment.
+- `src/rich_text.rs` — the markdown plugins that render a PR description's media: images
+  through the app's HTTP client, `<video>` embeds as cards that open in the browser.
+- `src/http.rs` — the macOS `NSURLSession` HTTP client, installed at startup.
+- `src/exec.rs` — spawns `gh`/`claude` with a widened PATH (Homebrew, mise shims) for bundled
+  launches.
+- `src/time.rs` — RFC 3339 parsing and age formatting for the timestamps `gh` returns.
 - `src/store.rs` — `settings.json` persistence (theme, comment template, panel widths) with
   `#[serde(default)]` fields so older settings files keep loading.
 
