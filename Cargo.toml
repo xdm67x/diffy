@@ -10,6 +10,27 @@ gpui-kit = { version = "0.8.1", features = ["tree-sitter-languages"] }
 color-eyre = "0.6.5"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# BoxFuture/AsyncRead for the HTTP client that loads remote media in PR descriptions.
+futures = "0.3"
+
+# NSURLSession-backed HTTP client on macOS, so images embedded in PR bodies load
+# over the network. Versions match the objc2 stack gpui already compiles.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSData",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSError",
+    "NSObject",
+    "NSString",
+    "NSURL",
+    "NSURLRequest",
+    "NSURLResponse",
+    "NSURLSession",
+] }
 
 [features]
 # Answers every `gh` and `claude` call with fixtures from `src/mock.rs` so the

@@ -3,6 +3,7 @@ use crate::ask::{self, AskEvent, AskSide, AskStatus, AskTask};
 use crate::log;
 use crate::models::{Finding, PullRequest, ReviewReport, Verdict};
 use crate::review::ReviewEvent;
+use crate::rich_text;
 use crate::state::{ReviewStatus, Row, State};
 use crate::store;
 use crate::time;
@@ -2087,21 +2088,22 @@ impl Diffy {
             )
     }
 
+    /// The PR description, rendered directly inside the panel (the scroll
+    /// container carries the padding): full markdown plus the media GitHub
+    /// embeds — images load over HTTP, videos render as cards that open in
+    /// the browser.
     fn description(&mut self, pr: &PullRequest, cx: &Context<Self>) -> impl IntoElement {
         v_flex()
             .gap_3()
-            .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
             .child(section_title("Description", cx))
             .child(
                 TextView::markdown(
                     ElementId::Name(format!("description-{}", pr.url).into()),
                     pr.description(),
                 )
-                .selectable(true),
+                .selectable(true)
+                .plugin(rich_text::VideoBlockPlugin)
+                .plugin(rich_text::VideoInlinePlugin),
             )
     }
 
@@ -3155,6 +3157,42 @@ mod tests {
                 "the diff should be a header strip again after collapsing, got {}px",
                 f32::from(strip.size.height)
             );
+        })
+        .unwrap();
+    }
+
+    /// The description renders directly in the panel (the scroll container
+    /// carries the padding, no card around it), and the media GitHub embeds
+    /// in a PR body come through: a `<video>` tag and a bare video URL each
+    /// render as a clickable video card.
+    #[gpui_kit::test]
+    fn the_description_renders_in_the_panel_with_media_embeds(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(bind_keys);
+        let mut media_pr = pr("acme/api", 1, "one");
+        media_pr.body = "Before\n\n![diagram](https://example.com/diagram.png)\n\n\
+             <video src=\"https://example.com/clip.mp4\" controls></video>\n\n\
+             https://example.com/walkthrough.webm"
+            .to_string();
+        let (handle, view) = open_app(cx, vec![media_pr]);
+
+        cx.update_window(handle, |_, window, cx| {
+            focus_window(&view, window, cx);
+            window.render_frame(cx);
+            assert!(
+                element_bounds(window, "description-content").is_some(),
+                "the description should fill the panel in the compact view"
+            );
+            for src in [
+                "https://example.com/clip.mp4",
+                "https://example.com/walkthrough.webm",
+            ] {
+                let id = format!("pr-video-{src}");
+                assert!(
+                    element_bounds(window, &id).is_some(),
+                    "the video at {src} should render as a card"
+                );
+            }
         })
         .unwrap();
     }

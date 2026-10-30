@@ -62,7 +62,8 @@ pub fn prs() -> Vec<PullRequest> {
             "Checkout: retry failed card charges",
             "dana",
             "Retries the gateway charge up to three times so a flaky card charge does not \
-             fail the order.",
+             fail the order.\n\n![retry flow](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAF0lEQVR4nGP438NAEiJN9aiGUQ1DSgMA/YOLELHsQkgAAAAASUVORK5CYII=)\n\n\
+             <video src=\"https://github.com/user-attachments/assets/0f2b1c3d-e4f5\" controls></video>",
             2,
             false,
         ),

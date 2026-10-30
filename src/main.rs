@@ -7,11 +7,13 @@ mod app;
 mod ask;
 mod claude;
 mod exec;
+mod http;
 mod log;
 #[cfg(feature = "mock")]
 mod mock;
 mod models;
 mod review;
+mod rich_text;
 mod state;
 mod store;
 mod theme;
@@ -77,6 +79,7 @@ fn main() -> Result<()> {
     application.run(|cx| {
         init(cx);
         theme::install(cx);
+        http::install(cx);
         bind_keys(cx);
         open_diffy(cx);
     });

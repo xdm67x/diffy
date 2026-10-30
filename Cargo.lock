@@ -1282,8 +1282,12 @@ dependencies = [
 name = "diffy"
 version = "0.13.0"
 dependencies = [
+ "block2 0.6.2",
  "color-eyre",
+ "futures",
  "gpui-kit",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
  "serde",
  "serde_json",
 ]
