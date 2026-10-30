@@ -647,10 +647,19 @@ impl Diffy {
                 h_flex()
                     .h_9()
                     .flex_shrink_0()
-                    .pl_20()
-                    .pr_3()
+                    .px_3()
                     .items_center()
                     .window_control_area(WindowControlArea::Drag)
+                    // The lights float over the left end, so equal spacers centre
+                    // the wordmark in the strip.
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().sidebar_foreground)
+                            .child("Diffy"),
+                    )
                     .child(div().flex_1()),
             )
             .child(
@@ -716,13 +725,6 @@ impl Diffy {
                     .items_center()
                     .border_t_1()
                     .border_color(cx.theme().sidebar_border)
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(cx.theme().sidebar_foreground)
-                            .child("Diffy"),
-                    )
                     .child(div().flex_1())
                     .when(active > 0, |this| {
                         this.child(
