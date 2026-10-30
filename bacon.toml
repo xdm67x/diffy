@@ -1,0 +1,18 @@
+#:schema https://dystroy.org/bacon/.bacon.schema.json
+
+# bacon dev (or press d in bacon) runs the app with the mock feature.
+[jobs.dev]
+command = ["cargo", "run", "--features", "mock"]
+need_stdout = true
+background = false
+scroll_anchor = "auto"
+show_command_error_code = true
+# bacon's default is wait_then_restart, which never fires for a GUI app that
+# doesn't exit: kill it and relaunch on every change of src
+on_change_strategy = "kill_then_restart"
+# the app is a child of cargo, which is all bacon kills by default
+kill = ["pkill", "-TERM", "-P"]
+watch = ["src"]
+
+[keybindings]
+d = "job:dev"
