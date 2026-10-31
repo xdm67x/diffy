@@ -7,6 +7,7 @@ use crate::rich_text;
 use crate::state::{ReviewStatus, Row, State};
 use crate::store;
 use crate::time;
+use crate::update::{self, Release};
 
 use gpui_kit::base::InteractiveElementExt as _;
 use gpui_kit::component::{
@@ -47,6 +48,9 @@ const REPOS_MAX_WIDTH: Pixels = px(320.);
 const PRS_DEFAULT_WIDTH: Pixels = px(240.);
 const PRS_MIN_WIDTH: Pixels = px(208.);
 const PRS_MAX_WIDTH: Pixels = px(480.);
+
+/// How often a newer release is looked for while the app stays open.
+const UPDATE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Clamps a dragged panel width to its usable range.
 fn clamp_repos_width(width: Pixels) -> Pixels {
@@ -121,6 +125,16 @@ enum DiffView {
     Failed(String),
 }
 
+/// What the app knows about a newer release; anything but `Idle` shows the
+/// update strip under the main panel's top bar.
+enum UpdateState {
+    /// No newer release, or the check is still running.
+    Idle,
+    Available(Release),
+    Installing,
+    Failed(String),
+}
+
 pub struct Diffy {
     state: State,
     focus_handle: FocusHandle,
@@ -151,6 +165,7 @@ pub struct Diffy {
     ask_ids: u64,
     /// When each running review started, keyed by PR url.
     started: HashMap<String, Instant>,
+    update: UpdateState,
     events: Sender<Incoming>,
     _subscriptions: Vec<Subscription>,
 }
@@ -221,6 +236,7 @@ impl Diffy {
             asks: HashMap::new(),
             ask_ids: 0,
             started: HashMap::new(),
+            update: UpdateState::Idle,
             events,
             _subscriptions: vec![subscription],
         };
@@ -258,6 +274,7 @@ impl Diffy {
             }
             Err(error) => this.set_error(format!("Could not load settings: {error:#}")),
         }
+        this.watch_for_updates(cx);
         this
     }
 
@@ -292,6 +309,68 @@ impl Diffy {
                     }
                 }
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Looks for a newer release on launch and every few hours, so a release
+    /// published while the window is open still shows up.
+    fn watch_for_updates(&mut self, cx: &mut Context<Self>) {
+        // Only an installed Diffy.app can replace itself; a build run from
+        // source would keep offering an update it cannot install.
+        if update::installed_bundle().is_err() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                match cx.background_spawn(async { update::latest() }).await {
+                    Ok(Some(release)) => {
+                        let shown = this.update(cx, |this, cx| {
+                            // Never replace what is already on screen.
+                            if matches!(this.update, UpdateState::Idle) {
+                                log::info(format!("Diffy {} is available", release.version));
+                                this.update = UpdateState::Available(release);
+                                cx.notify();
+                            }
+                        });
+                        if shown.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => log::error(format!("could not check for updates: {error:#}")),
+                }
+                if this.upgrade().is_none() {
+                    break;
+                }
+                cx.background_executor().timer(UPDATE_INTERVAL).await;
+            }
+        })
+        .detach();
+    }
+
+    /// Downloads the offered release and restarts into it. The new build
+    /// starts running here, so this one quits once the install succeeded.
+    fn install_update(&mut self, cx: &mut Context<Self>) {
+        let UpdateState::Available(release) =
+            std::mem::replace(&mut self.update, UpdateState::Installing)
+        else {
+            return;
+        };
+        log::info(format!("installing Diffy {}", release.version));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { update::install(&release) })
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => cx.quit(),
+                Err(error) => {
+                    log::error(format!("could not install the update: {error:#}"));
+                    this.update = UpdateState::Failed(format!("{error:#}"));
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -1144,7 +1223,60 @@ impl Diffy {
             .min_h_0()
             .h_full()
             .child(self.main_top_bar(cx))
+            .children(self.update_strip(cx))
             .child(self.detail(cx))
+    }
+
+    /// The strip announcing a newer release, under the main panel's top bar.
+    /// It stays absent until there is something to say.
+    fn update_strip(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let text = match &self.update {
+            UpdateState::Idle => return None,
+            UpdateState::Available(release) => {
+                format!("Diffy {} is available.", release.version)
+            }
+            UpdateState::Installing => "Downloading and installing…".to_string(),
+            UpdateState::Failed(error) => format!("Could not update: {error}"),
+        };
+        let action = match &self.update {
+            UpdateState::Available(_) => Button::new("install-update")
+                .small()
+                .label("Update")
+                .on_click(cx.listener(|this, _, _, cx| this.install_update(cx)))
+                .into_any_element(),
+            UpdateState::Installing => Spinner::new().small().into_any_element(),
+            // The update could not be installed from here, so point at the
+            // download the reader can install by hand.
+            UpdateState::Failed(_) => Link::new(ElementId::Name("update-release-page".into()))
+                .href(update::RELEASES_URL)
+                .text_xs()
+                .child("Download it from GitHub")
+                .into_any_element(),
+            UpdateState::Idle => Empty.into_any_element(),
+        };
+        Some(
+            h_flex()
+                .id("update-strip")
+                .test_support()
+                .flex_shrink_0()
+                .items_center()
+                .gap_3()
+                .px_6()
+                .py_2()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().muted)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(text),
+                )
+                .child(action)
+                .into_any_element(),
+        )
     }
 
     /// The strip above the content, a drag surface for the window.
@@ -2655,7 +2787,7 @@ fn plural(count: usize) -> &'static str {
 mod tests {
     use super::{
         DiffView, Diffy, MainTab, PRS_DEFAULT_WIDTH, PRS_MAX_WIDTH, REPOS_DEFAULT_WIDTH,
-        REPOS_MIN_WIDTH, bind_keys,
+        REPOS_MIN_WIDTH, UpdateState, bind_keys,
     };
     use crate::ask::{AskEvent, AskSide, AskStatus, AskTask};
     use crate::models::{Author, PullRequest, Repository};
@@ -3339,6 +3471,45 @@ mod tests {
             grammar.has_grammar(),
             "no rust grammar is compiled in; the diff renders without syntax colors"
         );
+    }
+
+    /// A newer release puts a strip under the main panel's top bar, above the
+    /// content; without one there is no strip at all.
+    #[gpui_kit::test]
+    fn a_newer_release_shows_an_update_strip_above_the_panel_body(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(bind_keys);
+        let (handle, view) = open_app(cx, vec![pr("acme/api", 1, "one")]);
+
+        cx.update_window(handle, |_, window, cx| {
+            focus_window(&view, window, cx);
+            window.render_frame(cx);
+            assert!(
+                element_bounds(window, "update-strip").is_none(),
+                "there is nothing to announce yet"
+            );
+        })
+        .unwrap();
+
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.update = UpdateState::Available(crate::update::Release {
+                    version: "0.15.0".to_string(),
+                    dmg_url: "https://example.com/diffy.dmg".to_string(),
+                });
+            });
+        });
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let strip = element_bounds(window, "update-strip").expect("update strip");
+            let tabs = element_bounds(window, "tabs-bar").expect("tab bar");
+            assert!(
+                f32::from(strip.origin.y) < f32::from(tabs.origin.y),
+                "the update strip sits above the panel body"
+            );
+        })
+        .unwrap();
     }
 
     /// The main panel opens on a tab bar at its top with the PR, Diff and

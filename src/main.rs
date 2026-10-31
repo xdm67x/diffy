@@ -18,6 +18,7 @@ mod state;
 mod store;
 mod theme;
 mod time;
+mod update;
 
 use app::{Diffy, bind_keys};
 use color_eyre::Result;
