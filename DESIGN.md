@@ -16,11 +16,13 @@ the middle, the selected PR's main panel on the right.
 ┌────────────────────┬──────────────────────────┬────────────────────────────────────┐
 │ top strip:         │ filter (⌘F)          ⟳   │ top strip: drag region             │
 │  ●●●    Diffy     ⚙├──────────────────────────┼────────────────────────────────────┤
-│ Repositories 2     │ PR rows…                 │ header: title, Yours tag, link,    │
-│  acme/api   2      │   (status marker per     │ meta, actions (Run review, posts)  │
-│  acme/web   1      │    row)                  ├────────────────────────────────────┤
-│                    │                          │ tabs: PR Diff Review · 3 files ●   │
+│ Repositories 2     │ PR rows…                 │ (update strip, when one is out)    │
+│  acme/api   2      │   (status marker per     ├────────────────────────────────────┤
+│  acme/web   1      │    row)                  │ header: title, Yours tag, link,    │
+│                    │                          │ meta, actions (Run review, posts)  │
 │                    │ (N reviews running)      ├────────────────────────────────────┤
+│                    │                          │ tabs: PR Diff Review · 3 files ●   │
+│                    │                          ├────────────────────────────────────┤
 │                    │                          │ tab content, fills the panel:      │
 │                    │                          │ PR description / diff / review     │
 └────────────────────┴──────────────────────────┴────────────────────────────────────┘
@@ -36,6 +38,12 @@ the middle, the selected PR's main panel on the right.
   the refresh button on the top row and narrows this list by title, author, and number. The
   selected row gets a soft orange fill; while reviews run, the bottom strip shows the
   running-review count.
+- **Update strip.** When a newer release is published, a one-line strip appears under the
+  main panel's top bar at the full width of that panel: `Diffy 0.15.0 is available.` with an
+  **Update** button at its right end, on the raised/chrome tone above a hairline. It is
+  chrome, not content: nothing in the panel moves when it appears, and it disappears again
+  when the update installs (a spinner takes the button's place meanwhile) or turns into the
+  failure text with a link to the releases page.
 - **Right panel — the main panel.** The selected PR: a compact header band (title with the
   `Yours` tag and the "Open on GitHub" link, a metadata line with number, repo, author, age,
   comments, and the actions — `Run review`, and once a review exists `Comment`,

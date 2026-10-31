@@ -34,6 +34,21 @@ The app is ad-hoc signed, not notarized, so the first launch is blocked by Gatek
 right-click **Diffy** and choose **Open**, or run
 `xattr -d com.apple.quarantine /Applications/Diffy.app`.
 
+## Updates
+
+Diffy checks GitHub for a newer release when it starts, and every six hours while it stays
+open (`gh api repos/xdm67x/diffy/releases/latest`). When the newest tag has a DMG and a higher
+version than the running build, a strip under the main panel's top bar names that version and
+offers an **Update** button. Pressing it downloads the DMG into a temporary directory, mounts
+it, puts the `Diffy.app` it holds in place of the running one, and starts the new build; the
+old build quits once the swap succeeded. The old bundle is only moved aside until the new one
+is in place, so a failed copy leaves the installed app as it was.
+
+An app that cannot replace itself — one running from a read-only volume, or started from a
+terminal — gets a link to the [releases](https://github.com/xdm67x/diffy/releases) page
+instead. A build that is not inside a `Diffy.app` bundle at all (`cargo run`) does not check
+for updates, and the `mock` feature never does.
+
 ## Run from source
 
 ```sh
