@@ -164,8 +164,8 @@ impl Diffy {
                 window,
                 |this, state, event, window, cx| match event {
                     InputEvent::Change => {
-                        let value = state.read(cx).value().to_string();
-                        this.state.set_filter(value);
+                        let filter_text = state.read(cx).value().to_string();
+                        this.state.set_filter(filter_text);
                         this.reset_selection_view(cx);
                     }
                     InputEvent::PressEnter { .. } => window.focus(&this.focus_handle, cx),

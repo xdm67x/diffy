@@ -103,14 +103,14 @@ fn execute(mut command: Command, prompt: &str, progress: &(dyn Fn(&str) + Sync))
         .stdout
         .take()
         .ok_or_else(|| eyre!("could not open claude stdout"))?;
-    let mut result: Option<ResultEnvelope> = None;
+    let mut last_envelope: Option<ResultEnvelope> = None;
     for line in BufReader::new(stdout).lines() {
         let line = line.wrap_err("could not read claude output")?;
         if let Some(label) = progress_label(&line) {
             progress(&label);
         }
         if let Some(envelope) = result_envelope(&line) {
-            result = Some(envelope);
+            last_envelope = Some(envelope);
         }
     }
 
@@ -118,22 +118,22 @@ fn execute(mut command: Command, prompt: &str, progress: &(dyn Fn(&str) + Sync))
     let stderr = stderr
         .and_then(|handle| handle.join().ok())
         .unwrap_or_default();
-    let result = result.ok_or_else(|| {
+    let envelope = last_envelope.ok_or_else(|| {
         eyre!(
             "claude produced no result event ({status}); stderr: {}",
             stderr.trim()
         )
     })?;
 
-    if !status.success() || result.is_error {
-        let detail = if result.text.trim().is_empty() {
+    if !status.success() || envelope.is_error {
+        let detail = if envelope.text.trim().is_empty() {
             stderr.trim()
         } else {
-            result.text.trim()
+            envelope.text.trim()
         };
         bail!("claude failed ({status}): {detail}");
     }
-    Ok(result.text)
+    Ok(envelope.text)
 }
 
 struct ResultEnvelope {

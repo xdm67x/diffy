@@ -31,23 +31,33 @@ pub fn get_prs() -> Result<Vec<PullRequest>> {
 }
 
 /// One `gh search prs` page for a single filter, e.g. `--author @me`.
-fn search_prs(flag: &str, value: &str) -> Result<Vec<PullRequest>> {
+fn search_prs(search_flag: &str, search_term: &str) -> Result<Vec<PullRequest>> {
     let output = crate::exec::command("gh")
         .args([
-            "search", "prs", flag, value, "--state", "open", "--limit", "100", "--json", PR_FIELDS,
+            "search",
+            "prs",
+            search_flag,
+            search_term,
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            PR_FIELDS,
         ])
         .output()
         .wrap_err("failed to run `gh`; is the GitHub CLI installed?")?;
 
     if !output.status.success() {
         return Err(eyre!(
-            "gh search prs {flag} {value} failed: {}",
+            "gh search prs {search_flag} {search_term} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
 
-    serde_json::from_slice(&output.stdout)
-        .wrap_err_with(|| format!("could not parse `gh search prs` output for {flag} {value}"))
+    serde_json::from_slice(&output.stdout).wrap_err_with(|| {
+        format!("could not parse `gh search prs` output for {search_flag} {search_term}")
+    })
 }
 
 /// The draft filter runs here rather than through a search flag, so the rule
@@ -84,7 +94,7 @@ pub enum ReviewAction {
 }
 
 impl ReviewAction {
-    fn flag(self) -> &'static str {
+    fn gh_review_flag(self) -> &'static str {
         match self {
             ReviewAction::Approve => "--approve",
             ReviewAction::RequestChanges => "--request-changes",
@@ -107,7 +117,14 @@ pub fn submit_review(
         return Ok(());
     }
     let mut child = crate::exec::command("gh")
-        .args(["pr", "review", &pr.url, action.flag(), "--body-file", "-"])
+        .args([
+            "pr",
+            "review",
+            &pr.url,
+            action.gh_review_flag(),
+            "--body-file",
+            "-",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
