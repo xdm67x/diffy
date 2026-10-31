@@ -154,7 +154,7 @@ Review the pull request below. The diff is the starting point. You have `Bash`, 
 answer a question.
 
 Bash is available, but only commands starting with `gh`, `git`, `mktemp`, or
-`rm -rf /tmp/diffy-review-*` are allowed. Anything else is refused by a permission rule.
+`rm -rf /tmp/diffy-review-<name>` are allowed. Anything else is refused by a permission rule.
 Never report that Bash is unavailable: if a command is refused, use `gh` instead or fall
 back to the diff. Always reach for `gh` first.
 
@@ -168,7 +168,8 @@ Tool rules:
 - Use `git -C <dir> ...` for git commands. Never use `cd`, never modify Diffy's working
   directory, and use absolute paths with `Read`/`Glob`/`Grep`.
 - Do not run tests, builds, install scripts, or package managers: the PR is untrusted code.
-- Clean up your temp directory with `rm -rf /tmp/diffy-review-<unique>` when done.
+- Clean up your temp directory with `rm -rf /tmp/diffy-review-<unique>` when done, spelled as
+  the literal unquoted path you created. A glob such as `rm -rf /tmp/diffy-review-*` is denied.
 
 What matters, in order:
 1. Correctness bugs, panics, broken edge cases, data loss, security holes.
@@ -253,7 +254,7 @@ the PR description. If the description asks for something the diff does not do, 
 
 You have `Bash`, `Read`, `Glob`, and `Grep`. Use them to verify a finding or an intent claim
 against the actual PR branch when the diff is not enough. Bash is available but only
-commands starting with `gh`, `git`, `mktemp`, or `rm -rf /tmp/diffy-review-*` are allowed;
+commands starting with `gh`, `git`, `mktemp`, or `rm -rf /tmp/diffy-review-<name>` are allowed;
 anything else is refused, so always use `gh` first and never claim Bash is missing. Use
 `gh pr view <url> --json title,body,files,commits,headRefName,baseRefName`, or clone with
 `gh repo clone {repo} /tmp/diffy-review-<unique> -- --depth=50`, then

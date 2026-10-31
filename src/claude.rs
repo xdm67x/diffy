@@ -53,7 +53,10 @@ fn base_command(system_prompt: &str) -> Command {
         .args(["--tools", "Bash,Read,Glob,Grep"])
         .arg("--allowedTools")
         // Both the `gh *` and `gh:*` rule spellings are accepted by different
-        // Claude Code versions; listing both keeps the allowlist working.
+        // Claude Code versions; listing both keeps the allowlist working. The
+        // rm rule matches a literal unquoted path only: a quoted path or a
+        // glob such as `rm -rf /tmp/diffy-review-*` is still denied, which is
+        // why the prompts spell the cleanup command out as a literal path.
         .args([
             "Bash(gh *)",
             "Bash(git *)",

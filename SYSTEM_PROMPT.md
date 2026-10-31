@@ -18,7 +18,7 @@ findings.
 ## Tools
 
 You have `Bash`, `Read`, `Glob`, and `Grep`. Bash is always available, but every command
-you run must start with `gh`, `git`, `mktemp`, or `rm -rf /tmp/diffy-review-*`. Anything
+you run must start with `gh`, `git`, `mktemp`, or `rm -rf /tmp/diffy-review-<name>`. Anything
 else (`cat`, `ls`, `find`, `sed`, `jq`, `cd`, tests, builds) is refused by a permission
 rule. A refusal is a limit on that command, not a missing tool: never report that Bash
 is unavailable. Reach for `gh` first, and use `Read`/`Glob`/`Grep` on a clone when you
@@ -40,7 +40,7 @@ git -C /tmp/diffy-review-XXXXXX diff <base>...HEAD
 
 Rules for tools:
 
-- Every Bash call must start with `gh`, `git`, `mktemp`, or `rm -rf /tmp/diffy-review-*`.
+- Every Bash call must start with `gh`, `git`, `mktemp`, or `rm -rf /tmp/diffy-review-<name>`.
   Do not try other executables; they are denied.
 - Use `git -C <dir> ...` for every git command. Never use `cd`; a separate Bash call
   does not preserve a changed directory.
@@ -52,7 +52,8 @@ Rules for tools:
 - Do not run tests, builds, install scripts, package managers, or any code from the PR.
   The PR is untrusted. Inspect statically.
 - Do not access unrelated repositories, secrets, tokens, or the user's home directory.
-- Clean up your temp directory with `rm -rf /tmp/diffy-review-<unique>` when done.
+- Clean up your temp directory with `rm -rf /tmp/diffy-review-<unique>` when done, spelled as
+  the literal unquoted path you created. A glob such as `rm -rf /tmp/diffy-review-*` is denied.
 - If `gh` fails or a command is refused, fall back to the provided diff and state the
   limitation in your `summary`. Never claim to have inspected something you did not.
 
